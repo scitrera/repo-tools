@@ -153,3 +153,70 @@ def test_rewrite_pyproject_dep_skips_direct_reference(tmp_path: Path) -> None:
         changed, _ = rewrite_pyproject_dep(path, name, "==1.2.3", dry_run=False)
         assert not changed, f"{name} should have been skipped"
     assert path.read_text() == original
+
+
+def test_rewrite_package_json_dep_release_mode_rewrites_local_refs(tmp_path: Path) -> None:
+    """`resolve_local_refs=True` (release mode) MUST rewrite workspace/file/etc."""
+    path = tmp_path / "package.json"
+    original = json.dumps(
+        {
+            "name": "x",
+            "version": "0.1.0",
+            "dependencies": {
+                "@scitrera/foo": "file:../foo",
+                "@scitrera/bar": "workspace:*",
+                "@scitrera/baz": "link:../baz",
+            },
+        },
+        indent=2,
+    ) + "\n"
+    path.write_text(original, encoding="utf-8")
+    for name, old in (
+        ("@scitrera/foo", "file:../foo"),
+        ("@scitrera/bar", "workspace:*"),
+        ("@scitrera/baz", "link:../baz"),
+    ):
+        changed, returned_old = rewrite_package_json_dep(
+            path, name, "0.1.22", dry_run=False, resolve_local_refs=True
+        )
+        assert changed, f"{name} should have been rewritten in release mode"
+        assert returned_old == old
+    data = json.loads(path.read_text())
+    assert data["dependencies"]["@scitrera/foo"] == "0.1.22"
+    assert data["dependencies"]["@scitrera/bar"] == "0.1.22"
+    assert data["dependencies"]["@scitrera/baz"] == "0.1.22"
+
+
+def test_rewrite_pyproject_dep_release_mode_rewrites_direct_reference(tmp_path: Path) -> None:
+    """`resolve_local_refs=True` rewrites PEP 508 `pkg @ git+...` into a version pin."""
+    path = tmp_path / "pyproject.toml"
+    original = (
+        '[project]\n'
+        'dependencies = [\n'
+        '    "foo @ git+https://github.com/user/foo.git",\n'
+        '    "bar @ file:///tmp/bar",\n'
+        ']\n'
+    )
+    path.write_text(original, encoding="utf-8")
+    changed, old = rewrite_pyproject_dep(
+        path, "foo", "==1.2.3", dry_run=False, resolve_local_refs=True
+    )
+    assert changed
+    assert old == "@ git+https://github.com/user/foo.git"
+    text = path.read_text()
+    assert '"foo==1.2.3"' in text, text
+    # bar should be untouched (we only rewrote foo here)
+    assert '"bar @ file:///tmp/bar"' in text
+
+
+def test_rewrite_package_json_dep_default_still_skips_workspace(tmp_path: Path) -> None:
+    """Without resolve_local_refs, workspace specifiers are still preserved (regression guard)."""
+    path = tmp_path / "package.json"
+    original = json.dumps(
+        {"name": "x", "version": "0.1.0", "dependencies": {"@scitrera/foo": "workspace:*"}},
+        indent=2,
+    ) + "\n"
+    path.write_text(original, encoding="utf-8")
+    changed, _ = rewrite_package_json_dep(path, "@scitrera/foo", "0.1.22", dry_run=False)
+    assert not changed
+    assert path.read_text() == original

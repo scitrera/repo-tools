@@ -59,8 +59,17 @@ def rewrite_pyproject_dep(
     dep_name: str,
     new_requirement: str,
     dry_run: bool,
+    *,
+    resolve_local_refs: bool = False,
 ) -> Tuple[bool, Optional[str]]:
     """Rewrite the version part of an existing dep entry in a pyproject.toml.
+
+    `resolve_local_refs=False` (default) preserves PEP 508 direct-reference
+    deps (`pkg @ git+...`, `pkg @ file:///...`).
+
+    `resolve_local_refs=True` (release-prep mode) rewrites those into version
+    specifiers — use before publishing to PyPI to convert direct references
+    into the canonical version from `versions.yaml`.
 
     Only updates existing matching entries. Never inserts new deps.
     Returns (changed, old_spec_string).
@@ -83,14 +92,19 @@ def rewrite_pyproject_dep(
         existing = spec.rstrip()
         if existing == new_requirement:
             continue
-        if _is_non_version_spec(existing):
+        is_direct_ref = _is_non_version_spec(existing)
+        if is_direct_ref and not resolve_local_refs:
             continue
+
+        # For direct-reference deps, drop the trailing whitespace inside `prefix`
+        # so we emit `"pkg==1.2.3"` instead of `"pkg ==1.2.3"`.
+        emit_prefix = prefix.rstrip() if is_direct_ref else prefix
 
         if old_spec is None:
             old_spec = existing
 
         new_text_parts.append(text[last_end:m.start()])
-        new_text_parts.append(f"{q}{prefix}{new_requirement}{tail}{q}")
+        new_text_parts.append(f"{q}{emit_prefix}{new_requirement}{tail}{q}")
         last_end = m.end()
         changed = True
 

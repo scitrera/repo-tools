@@ -60,7 +60,18 @@ def rewrite_package_json_dep(
     dep_name: str,
     new_requirement: str,
     dry_run: bool,
+    *,
+    resolve_local_refs: bool = False,
 ) -> Tuple[bool, Optional[str]]:
+    """Rewrite an existing dep entry across all four npm dep sections.
+
+    `resolve_local_refs=False` (default) preserves workspace/file/link/git/url
+    specifiers — local-dev linkage stays intact.
+
+    `resolve_local_refs=True` (release-prep mode) rewrites those specifiers
+    into version pins.  Use before `npm publish` to convert workspace
+    references into the canonical version from `versions.yaml`.
+    """
     text = _read_text(path)
     data = json.loads(text)
 
@@ -74,9 +85,11 @@ def rewrite_package_json_dep(
             existing = section[dep_name]
             if existing == new_requirement:
                 continue
-            if isinstance(existing, str) and _is_non_version_spec(existing):
-                # Preserve workspace/file/git/url specifiers; pre-publish tooling
-                # is expected to convert these to version specifiers at release time.
+            if (
+                not resolve_local_refs
+                and isinstance(existing, str)
+                and _is_non_version_spec(existing)
+            ):
                 continue
             if old_spec is None:
                 old_spec = existing

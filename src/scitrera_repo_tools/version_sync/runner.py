@@ -107,6 +107,7 @@ def _phase_b(
     *,
     check: bool,
     verbose: bool,
+    release: bool,
     changes: List[ChangeRecord],
     errors: List[str],
     touched: Set[Tuple[Path, str]],
@@ -147,7 +148,8 @@ def _phase_b(
                 requirement = normalizer(version)
                 try:
                     changed, old_spec = rewriter(
-                        manifest, external_name, requirement, check
+                        manifest, external_name, requirement, check,
+                        resolve_local_refs=release,
                     )
                 except Exception as exc:
                     errors.append(
@@ -169,6 +171,7 @@ def _phase_c(
     *,
     check: bool,
     verbose: bool,
+    release: bool,
     changes: List[ChangeRecord],
     errors: List[str],
     touched: Set[Tuple[Path, str]],
@@ -195,7 +198,10 @@ def _phase_c(
                 if not manifest.exists():
                     continue
                 try:
-                    changed, old_spec = rewriter(manifest, dep_name, requirement, check)
+                    changed, old_spec = rewriter(
+                        manifest, dep_name, requirement, check,
+                        resolve_local_refs=release,
+                    )
                 except Exception as exc:
                     errors.append(
                         f"Failed to rewrite {dep_name} in {manifest}: {exc}"
@@ -216,6 +222,7 @@ def _phase_d(
     *,
     check: bool,
     verbose: bool,
+    release: bool,
     changes: List[ChangeRecord],
     errors: List[str],
     touched: Set[Tuple[Path, str]],
@@ -284,7 +291,10 @@ def _phase_d(
             if not manifest.exists():
                 continue
             try:
-                changed, old_spec = rewriter(manifest, dep_name, requirement, check)
+                changed, old_spec = rewriter(
+                    manifest, dep_name, requirement, check,
+                    resolve_local_refs=release,
+                )
             except Exception as exc:
                 errors.append(f"Failed to rewrite {dep_name} in {manifest}: {exc}")
                 continue
@@ -300,17 +310,34 @@ def _phase_d(
                 )
 
 
-def run(config: SyncConfig, *, check: bool = False, verbose: bool = False) -> int:
+def run(
+    config: SyncConfig,
+    *,
+    check: bool = False,
+    verbose: bool = False,
+    release: bool = False,
+) -> int:
+    """Synchronize versions per `config`.
+
+    `release=True` (opt-in) rewrites local-reference dep specifiers
+    (`file:`, `workspace:`, `link:`, git/url, PEP 508 `@ git+...`) into
+    canonical version pins. Use BEFORE publishing to PyPI/npm.
+    Default `False` preserves local refs for normal development.
+    """
     changes: List[ChangeRecord] = []
     errors: List[str] = []
     touched: Set[Tuple[Path, str]] = set()
     pending_for_phase_d: Dict[str, List[Tuple[Path, str]]] = {}
+
+    if release:
+        logger.info("Running in --release mode: local refs will be rewritten to version pins.")
 
     _phase_a(config, check=check, verbose=verbose, changes=changes, errors=errors)
     _phase_b(
         config,
         check=check,
         verbose=verbose,
+        release=release,
         changes=changes,
         errors=errors,
         touched=touched,
@@ -319,6 +346,7 @@ def run(config: SyncConfig, *, check: bool = False, verbose: bool = False) -> in
         config,
         check=check,
         verbose=verbose,
+        release=release,
         changes=changes,
         errors=errors,
         touched=touched,
@@ -328,6 +356,7 @@ def run(config: SyncConfig, *, check: bool = False, verbose: bool = False) -> in
         config,
         check=check,
         verbose=verbose,
+        release=release,
         changes=changes,
         errors=errors,
         touched=touched,

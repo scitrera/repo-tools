@@ -56,6 +56,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Monorepo root for resolving relative paths "
              "(default: parent directory of the config file)",
     )
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        help=(
+            "Release-prep mode: also rewrite local-reference dep specifiers "
+            "(`file:`, `workspace:`, `link:`, git/url, PEP 508 `@ git+...`) "
+            "into the canonical version from versions.yaml. Use this BEFORE "
+            "publishing to PyPI/npm; default behavior preserves local refs."
+        ),
+    )
     return parser
 
 
@@ -96,7 +106,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         logger.error("Configuration error: %s", exc)
         sys.exit(2)
 
-    sys.exit(run(config, check=args.check, verbose=args.verbose))
+    sys.exit(
+        run(config, check=args.check, verbose=args.verbose, release=args.release)
+    )
 
 
 __all__ = ["main"]

@@ -15,10 +15,31 @@ pip install -e .
 From any directory inside a monorepo containing a `versions.yaml`:
 
 ```bash
-sync-versions            # apply updates
+sync-versions            # apply updates (preserves local refs)
 sync-versions --check    # dry-run, exit 1 on drift
 sync-versions --verbose  # show every file inspected
 sync-versions --config path/to/versions.yaml
+```
+
+### Release mode
+
+By default, `sync-versions` preserves local-reference dep specifiers
+(`file:../foo`, `workspace:*`, `link:`, `git+...`, PEP 508 `pkg @ git+...`)
+so local development keeps working. Before publishing to PyPI/npm, opt in
+to rewrite those into canonical version pins from `versions.yaml`:
+
+```bash
+sync-versions --release            # rewrite local refs to version pins
+sync-versions --release --check    # preview the release-pass diff in CI
+```
+
+Typical pre-publish flow:
+
+```bash
+sync-versions --release
+git diff                            # review the version-pin substitutions
+# ... build + publish (npm publish / uv publish) ...
+git checkout -- .                   # restore local refs for ongoing dev
 ```
 
 ## `versions.yaml` schema
