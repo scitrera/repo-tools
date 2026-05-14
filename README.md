@@ -52,9 +52,12 @@ my-ts-pkg: 0.1.22
 # External dep pins per language (optional)
 preferred_versions:
   python:
-    "pydantic": "2.13.4"
+    "pydantic": "2.13.4"             # bare -> `==2.13.4`; literal w/ operator preserved
   typescript:
     "@modelcontextprotocol/sdk": "^1.26.0"
+  go:
+    "google.golang.org/grpc": "v1.65.0"      # bare or `v`-prefixed both accepted
+    "google.golang.org/protobuf": "1.34.1"
 
 # Per-project file rules (replaces the hardcoded PROJECT_RULES dict)
 project_rules:
@@ -77,6 +80,12 @@ dependency_mappings:
 sources:
   python:
     - "uv.lock"
+
+# Global Go toolchain directives (optional, no-inject)
+# Walks every go.mod referenced in project_rules.gomod_require.
+go_toolchain:
+  go:        "1.25"      # rewrites the `go X.Y` directive
+  toolchain: "1.25.10"   # rewrites `toolchain goX.Y.Z` (Go 1.21+ feature)
 ```
 
 ## Releases

@@ -36,4 +36,42 @@ def update_gomod_require(
     return True, old
 
 
-__all__ = ["update_gomod_require"]
+def rewrite_gomod_require(
+    path: Path,
+    dep_name: str,
+    new_requirement: str,
+    dry_run: bool,
+    *,
+    resolve_local_refs: bool = False,
+) -> Tuple[bool, Optional[str]]:
+    """Rewrite an existing `require <dep_name> v<version>` line in go.mod.
+
+    `dep_name` is the Go module path (e.g., `google.golang.org/grpc`).
+    `new_requirement` is the target version, with or without leading `v`
+    (e.g., `v1.65.0` or `1.65.0`).
+
+    `resolve_local_refs` has no effect on Go: `replace` directives don't
+    affect downstream consumers (Go 1.21+) and are not rewritten.
+
+    Returns (changed, old_version_with_v_prefix).
+    """
+    del resolve_local_refs  # noqa: see docstring
+    bare = new_requirement[1:] if new_requirement.startswith("v") else new_requirement
+
+    text = _read_text(path)
+    pattern = _make_gomod_re(dep_name)
+    m = pattern.search(text)
+    if m is None:
+        return False, None
+
+    old_bare = m.group(2)
+    if old_bare == bare:
+        return False, f"v{old_bare}"
+
+    new_text = pattern.sub(rf"\g<1>{bare}", text, count=1)
+    if not dry_run:
+        _write_text(path, new_text)
+    return True, f"v{old_bare}"
+
+
+__all__ = ["update_gomod_require", "rewrite_gomod_require"]

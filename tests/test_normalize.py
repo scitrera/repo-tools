@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from scitrera_repo_tools.version_sync.normalize import (
+    normalize_go,
     normalize_python,
     normalize_typescript,
 )
@@ -41,3 +42,23 @@ def test_normalize_python_strips_whitespace() -> None:
 )
 def test_normalize_typescript_verbatim(raw: str) -> None:
     assert normalize_typescript(raw) == raw
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("1.2.3", "v1.2.3"),
+        ("v1.2.3", "v1.2.3"),
+        ("0.1.60", "v0.1.60"),
+        ("v0.1.60", "v0.1.60"),
+        ("v1.2.3-rc.1", "v1.2.3-rc.1"),
+        ("v0.0.0-20240101120000-abc1234567890", "v0.0.0-20240101120000-abc1234567890"),
+    ],
+)
+def test_normalize_go(raw: str, expected: str) -> None:
+    assert normalize_go(raw) == expected
+
+
+def test_normalize_go_strips_whitespace() -> None:
+    assert normalize_go("  1.2.3  ") == "v1.2.3"
+    assert normalize_go("  v1.2.3  ") == "v1.2.3"

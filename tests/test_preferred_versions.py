@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 from textwrap import dedent
 
+from scitrera_repo_tools.version_sync.strategies.gomod_require import (
+    rewrite_gomod_require,
+)
 from scitrera_repo_tools.version_sync.strategies.package_json import (
     rewrite_package_json_dep,
 )
@@ -220,3 +223,67 @@ def test_rewrite_package_json_dep_default_still_skips_workspace(tmp_path: Path) 
     changed, _ = rewrite_package_json_dep(path, "@scitrera/foo", "0.1.22", dry_run=False)
     assert not changed
     assert path.read_text() == original
+
+
+def test_rewrite_gomod_require_updates_existing(tmp_path: Path) -> None:
+    path = tmp_path / "go.mod"
+    path.write_text(
+        'module example.com/x\n\ngo 1.21\n\nrequire (\n'
+        '\tgoogle.golang.org/grpc v1.60.0\n'
+        '\tgoogle.golang.org/protobuf v1.33.0\n'
+        ')\n',
+        encoding="utf-8",
+    )
+    changed, old = rewrite_gomod_require(path, "google.golang.org/grpc", "v1.65.0", dry_run=False)
+    assert changed and old == "v1.60.0"
+    text = path.read_text()
+    assert "google.golang.org/grpc v1.65.0" in text
+    assert "google.golang.org/protobuf v1.33.0" in text
+
+
+def test_rewrite_gomod_require_accepts_bare_version(tmp_path: Path) -> None:
+    """A version string without leading `v` should still work."""
+    path = tmp_path / "go.mod"
+    path.write_text(
+        "module example.com/x\n\nrequire google.golang.org/grpc v1.60.0\n",
+        encoding="utf-8",
+    )
+    changed, old = rewrite_gomod_require(path, "google.golang.org/grpc", "1.65.0", dry_run=False)
+    assert changed and old == "v1.60.0"
+    assert "google.golang.org/grpc v1.65.0" in path.read_text()
+
+
+def test_rewrite_gomod_require_no_inject(tmp_path: Path) -> None:
+    """If the module isn't already required, do nothing."""
+    path = tmp_path / "go.mod"
+    original = "module example.com/x\n\nrequire google.golang.org/grpc v1.60.0\n"
+    path.write_text(original, encoding="utf-8")
+    changed, old = rewrite_gomod_require(path, "missing/module", "v1.0.0", dry_run=False)
+    assert not changed and old is None
+    assert path.read_text() == original
+
+
+def test_rewrite_gomod_require_idempotent(tmp_path: Path) -> None:
+    path = tmp_path / "go.mod"
+    path.write_text(
+        "module example.com/x\n\nrequire google.golang.org/grpc v1.65.0\n",
+        encoding="utf-8",
+    )
+    changed, _ = rewrite_gomod_require(path, "google.golang.org/grpc", "v1.65.0", dry_run=False)
+    assert not changed
+
+
+def test_rewrite_gomod_require_ignores_replace_directive(tmp_path: Path) -> None:
+    """`replace` lines must not be matched by the require regex."""
+    path = tmp_path / "go.mod"
+    original = (
+        "module example.com/x\n\n"
+        "require google.golang.org/grpc v1.60.0\n\n"
+        "replace google.golang.org/grpc => ../grpc-fork\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    changed, old = rewrite_gomod_require(path, "google.golang.org/grpc", "v1.65.0", dry_run=False)
+    assert changed and old == "v1.60.0"
+    text = path.read_text()
+    assert "require google.golang.org/grpc v1.65.0" in text
+    assert "replace google.golang.org/grpc => ../grpc-fork" in text, "replace must be untouched"

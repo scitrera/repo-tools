@@ -10,7 +10,13 @@ import yaml
 
 from .strategies.base import validate_version
 
-RESERVED_KEYS = ("preferred_versions", "project_rules", "dependency_mappings", "sources")
+RESERVED_KEYS = (
+    "preferred_versions",
+    "project_rules",
+    "dependency_mappings",
+    "sources",
+    "go_toolchain",
+)
 
 
 class ConfigError(ValueError):
@@ -60,6 +66,24 @@ class SourcesConfig:
 
 
 @dataclass(frozen=True)
+class GoToolchainConfig:
+    """Global Go-language directives applied to every discovered go.mod.
+
+    - `go`         -> rewrites the `go X.Y[.Z]` directive
+    - `toolchain`  -> rewrites the `toolchain goX.Y.Z` directive
+
+    Both fields are optional and no-inject: a missing directive triggers a
+    warning, not an addition.
+    """
+    go: Optional[str] = None
+    toolchain: Optional[str] = None
+
+    @property
+    def is_empty(self) -> bool:
+        return self.go is None and self.toolchain is None
+
+
+@dataclass(frozen=True)
 class SyncConfig:
     yaml_path: Path
     root: Path
@@ -68,6 +92,7 @@ class SyncConfig:
     preferred_versions: PreferredVersions
     dependency_mappings: DependencyMappings
     sources: SourcesConfig
+    go_toolchain: GoToolchainConfig = field(default_factory=lambda: GoToolchainConfig())
 
 
 def _expect_mapping(value: Any, where: str) -> Dict[str, Any]:
@@ -182,6 +207,25 @@ def _parse_dependency_mappings(raw: Any) -> DependencyMappings:
     return DependencyMappings(packages=packages, dependencies=dependencies)
 
 
+def _parse_go_toolchain(raw: Any) -> GoToolchainConfig:
+    if raw is None:
+        return GoToolchainConfig()
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"go_toolchain: expected mapping, got {type(raw).__name__}"
+        )
+    go = raw.get("go")
+    toolchain = raw.get("toolchain")
+    if go is not None and not isinstance(go, (str, int, float)):
+        raise ConfigError("go_toolchain.go: expected version string")
+    if toolchain is not None and not isinstance(toolchain, (str, int, float)):
+        raise ConfigError("go_toolchain.toolchain: expected version string")
+    return GoToolchainConfig(
+        go=str(go) if go is not None else None,
+        toolchain=str(toolchain) if toolchain is not None else None,
+    )
+
+
 def _parse_sources(raw: Any) -> SourcesConfig:
     by_lang: Dict[str, List[str]] = {}
     raw_map = _expect_mapping(raw, "sources")
@@ -222,6 +266,7 @@ def load_config(yaml_path: Path, *, root: Optional[Path] = None) -> SyncConfig:
     preferred = _parse_preferred(data.get("preferred_versions"))
     deps = _parse_dependency_mappings(data.get("dependency_mappings"))
     sources = _parse_sources(data.get("sources"))
+    go_toolchain = _parse_go_toolchain(data.get("go_toolchain"))
 
     return SyncConfig(
         yaml_path=yaml_path,
@@ -231,6 +276,7 @@ def load_config(yaml_path: Path, *, root: Optional[Path] = None) -> SyncConfig:
         preferred_versions=preferred,
         dependency_mappings=deps,
         sources=sources,
+        go_toolchain=go_toolchain,
     )
 
 
@@ -240,6 +286,7 @@ __all__ = [
     "PreferredVersions",
     "DependencyMappings",
     "SourcesConfig",
+    "GoToolchainConfig",
     "SyncConfig",
     "load_config",
     "RESERVED_KEYS",

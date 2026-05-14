@@ -7,9 +7,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from .config import SyncConfig
-from .normalize import normalize_python, normalize_typescript
+from .normalize import normalize_go, normalize_python, normalize_typescript
 from .sources import SOURCE_READER_MAP, detect_reader
 from .strategies import STRATEGY_MAP
+from .strategies.gomod_directives import (
+    update_gomod_go_directive,
+    update_gomod_toolchain_directive,
+)
+from .strategies.gomod_require import rewrite_gomod_require
 from .strategies.package_json import rewrite_package_json_dep
 from .strategies.pyproject import rewrite_pyproject_dep
 
@@ -19,20 +24,24 @@ ChangeRecord = Tuple[Path, str, Optional[str], str]
 
 _PY_MANIFEST_TYPES = {"pyproject"}
 _TS_MANIFEST_TYPES = {"package"}
+_GO_MANIFEST_TYPES = {"gomod_require"}
 
 _NORMALIZERS = {
     "python": normalize_python,
     "typescript": normalize_typescript,
+    "go": normalize_go,
 }
 
 _REWRITERS = {
     "python": rewrite_pyproject_dep,
     "typescript": rewrite_package_json_dep,
+    "go": rewrite_gomod_require,
 }
 
 _LANG_MANIFEST_TYPES = {
     "python": _PY_MANIFEST_TYPES,
     "typescript": _TS_MANIFEST_TYPES,
+    "go": _GO_MANIFEST_TYPES,
 }
 
 
@@ -310,6 +319,68 @@ def _phase_d(
                 )
 
 
+def _phase_e_go_toolchain(
+    config: SyncConfig,
+    *,
+    check: bool,
+    verbose: bool,
+    changes: List[ChangeRecord],
+    errors: List[str],
+) -> None:
+    """Update top-level `go` and `toolchain` directives in every discovered go.mod."""
+    tc = config.go_toolchain
+    if tc.is_empty:
+        return
+
+    manifests = _manifests_for_language(config, "go")
+    if not manifests:
+        if verbose:
+            logger.debug("go_toolchain configured but no go.mod manifests found.")
+        return
+
+    seen: Set[Path] = set()
+    for manifest in manifests.values():
+        if manifest in seen:
+            continue
+        seen.add(manifest)
+        if not manifest.exists():
+            errors.append(f"go.mod not found for go_toolchain phase: {manifest}")
+            continue
+
+        if tc.go is not None:
+            try:
+                changed, old = update_gomod_go_directive(manifest, tc.go, check)
+            except Exception as exc:
+                errors.append(f"Failed to update `go` directive in {manifest}: {exc}")
+            else:
+                if changed:
+                    changes.append((manifest, "go-directive", old, tc.go))
+                    msg = f"  {manifest}: go {old} -> {tc.go}"
+                    if verbose or check:
+                        logger.info(msg)
+                elif verbose:
+                    logger.info("  %s: go already %s", manifest, tc.go)
+
+        if tc.toolchain is not None:
+            try:
+                changed, old = update_gomod_toolchain_directive(
+                    manifest, tc.toolchain, check
+                )
+            except Exception as exc:
+                errors.append(
+                    f"Failed to update `toolchain` directive in {manifest}: {exc}"
+                )
+            else:
+                if changed:
+                    new_repr = f"go{tc.toolchain}" if not tc.toolchain.startswith("go") else tc.toolchain
+                    changes.append((manifest, "toolchain-directive", old, new_repr))
+                    msg = f"  {manifest}: toolchain {old} -> {new_repr}"
+                    if verbose or check:
+                        logger.info(msg)
+                elif verbose:
+                    logger.info("  %s: toolchain already %s", manifest, tc.toolchain)
+
+
 def run(
     config: SyncConfig,
     *,
@@ -361,6 +432,13 @@ def run(
         errors=errors,
         touched=touched,
         pending_for_phase_d=pending_for_phase_d,
+    )
+    _phase_e_go_toolchain(
+        config,
+        check=check,
+        verbose=verbose,
+        changes=changes,
+        errors=errors,
     )
 
     if errors:
