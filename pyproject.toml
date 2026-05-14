@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scitrera-repo-tools"
-version = "0.1.4"
+version = "0.1.5"
 description = "Centralized monorepo version-sync tool driven by versions.yaml."
 readme = "README.md"
 requires-python = ">=3.11"

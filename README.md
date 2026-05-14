@@ -58,6 +58,16 @@ sources:
     - "uv.lock"
 ```
 
+## Releases
+
+Releases are automated via GitHub Actions on tag push (`v*.*.*`):
+
+1. CI runs the test suite on Python 3.11/3.12/3.13.
+2. A guard step asserts the tag matches `pyproject.toml`'s `[project].version`.
+3. `python -m build` produces an sdist + wheel.
+4. The artifacts are published to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/) (OIDC; no API token).
+5. A GitHub Release is created with the artifacts attached.
+
 ## License
 
 BSD 3-Clause.
