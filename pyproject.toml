@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scitrera-repo-tools"
+version = "0.1.4"
+description = "Centralized monorepo version-sync tool driven by versions.yaml."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [
+    { name = "scitrera.ai", email = "open-source-team@scitrera.com" },
+]
+keywords = ["monorepo", "version", "sync", "pyproject", "package.json"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Build Tools",
+]
+dependencies = [
+    "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest==9.0.3",
+]
+
+[project.scripts]
+repo-tools = "scitrera_repo_tools.__main__:main"
+sync-versions = "scitrera_repo_tools.version_sync.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/scitrera/repo-tools"
+Repository = "https://github.com/scitrera/repo-tools"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scitrera_repo_tools"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

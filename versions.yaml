@@ -1,0 +1,18 @@
+# Authoritative versions for scitrera-repo-tools.
+# Run: sync-versions             to apply
+# Run: sync-versions --check     to verify (CI-friendly)
+
+scitrera-repo-tools: 0.1.4
+
+# Pin external runtime + dev dependencies for security & consistency.
+# Literal value form (`>=6.0`, `>=7.0`) is preserved verbatim per the
+# normalization rule (anything starting with an operator is used as-is).
+preferred_versions:
+  python:
+    "PyYAML": "6.0.3"
+    "pytest": "9.0.3"
+
+project_rules:
+  scitrera-repo-tools:
+    - { type: pyproject, path: pyproject.toml }
+    - { type: init_py,   path: src/scitrera_repo_tools/__init__.py }
