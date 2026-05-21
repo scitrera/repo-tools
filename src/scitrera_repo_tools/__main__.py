@@ -1,5 +1,8 @@
 """Dispatcher for `python -m scitrera_repo_tools <subcommand>`."""
 
+#  Copyright (c) 2026. Scitrera LLC. Licensed under 3-clause BSD license
+#  (see LICENSE file at https://github.com/scitrera/repo-tools/blob/main/LICENSE)
+
 from __future__ import annotations
 
 import sys
@@ -13,6 +16,9 @@ def main() -> None:
             "\n"
             "subcommands:\n"
             "  sync-versions    Synchronize versions across a monorepo from versions.yaml\n"
+            "  npm-audit        Run `npm audit` across every TS package in versions.yaml\n"
+            "  missing-deps     Print pyproject.toml deps that are not yet installed\n"
+            "  directory-split  Split a directory into N approximately-equal buckets\n"
         )
         sys.exit(0 if argv else 1)
 
@@ -23,6 +29,17 @@ def main() -> None:
         from scitrera_repo_tools.version_sync.cli import main as sync_main
         sys.argv = ["sync-versions", *remaining]
         sync_main()
+    elif subcommand == "npm-audit":
+        from scitrera_repo_tools.npm_audit.cli import main as audit_main
+        sys.argv = ["npm-audit", *remaining]
+        audit_main()
+    elif subcommand == "missing-deps":
+        from scitrera_repo_tools.missing_deps import main as missing_deps_main
+        sys.argv = ["missing-deps", *remaining]
+        sys.exit(missing_deps_main())
+    elif subcommand == "directory-split":
+        from scitrera_repo_tools.directory_split import main as dir_split_main
+        sys.exit(dir_split_main(remaining))
     else:
         print(f"unknown subcommand: {subcommand}", file=sys.stderr)
         sys.exit(2)

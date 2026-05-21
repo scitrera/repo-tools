@@ -1,5 +1,8 @@
 """Orchestrates phases A (project versions), B (deps mappings), C (preferred), D (sources)."""
 
+#  Copyright (c) 2026. Scitrera LLC. Licensed under 3-clause BSD license
+#  (see LICENSE file at https://github.com/scitrera/repo-tools/blob/main/LICENSE)
+
 from __future__ import annotations
 
 import logging
@@ -7,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from .config import SyncConfig
+from .discovery import manifests_for_language as _manifests_for_language
 from .normalize import normalize_go, normalize_python, normalize_typescript
 from .sources import SOURCE_READER_MAP, detect_reader
 from .strategies import STRATEGY_MAP
@@ -22,10 +26,6 @@ logger = logging.getLogger("scitrera_repo_tools.version_sync")
 
 ChangeRecord = Tuple[Path, str, Optional[str], str]
 
-_PY_MANIFEST_TYPES = {"pyproject"}
-_TS_MANIFEST_TYPES = {"package"}
-_GO_MANIFEST_TYPES = {"gomod_require"}
-
 _NORMALIZERS = {
     "python": normalize_python,
     "typescript": normalize_typescript,
@@ -37,24 +37,6 @@ _REWRITERS = {
     "typescript": rewrite_package_json_dep,
     "go": rewrite_gomod_require,
 }
-
-_LANG_MANIFEST_TYPES = {
-    "python": _PY_MANIFEST_TYPES,
-    "typescript": _TS_MANIFEST_TYPES,
-    "go": _GO_MANIFEST_TYPES,
-}
-
-
-def _manifests_for_language(config: SyncConfig, lang: str) -> Dict[str, Path]:
-    """Return {project_name: manifest_path} for projects with a manifest of this language."""
-    types = _LANG_MANIFEST_TYPES.get(lang, set())
-    out: Dict[str, Path] = {}
-    for project, rules in config.project_rules.items():
-        for rule in rules:
-            if rule.type in types:
-                out[project] = (config.root / rule.path).resolve()
-                break
-    return out
 
 
 def _phase_a(

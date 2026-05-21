@@ -32,3 +32,4 @@ env/
 # OMC / Claude
 .omc/
 .slop/
+/uv.lock

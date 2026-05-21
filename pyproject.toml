@@ -23,6 +23,7 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
 ]
 dependencies = [
+    "packaging>=26.2",
     "PyYAML==6.0.3",
 ]
 
@@ -34,6 +35,9 @@ test = [
 [project.scripts]
 repo-tools = "scitrera_repo_tools.__main__:main"
 sync-versions = "scitrera_repo_tools.version_sync.cli:main"
+npm-audit = "scitrera_repo_tools.npm_audit.cli:main"
+missing-deps = "scitrera_repo_tools.missing_deps:main"
+directory-split = "scitrera_repo_tools.directory_split:main"
 
 [project.urls]
 Homepage = "https://github.com/scitrera/repo-tools"
