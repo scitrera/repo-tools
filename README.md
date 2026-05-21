@@ -1,6 +1,8 @@
 # scitrera-repo-tools
 
-Centralized monorepo version-sync tool driven by `versions.yaml`.
+Monorepo maintenance toolkit. The primary subcommand, `sync-versions`, is
+driven by `versions.yaml`; auxiliary subcommands (`npm-audit`, `missing-deps`,
+`directory-split`) reuse the same config or stand alone.
 
 ## Install
 
@@ -10,7 +12,21 @@ pip install scitrera-repo-tools
 pip install -e .
 ```
 
-## Usage
+Every subcommand is available either as a top-level console script or via the
+`repo-tools` dispatcher:
+
+```bash
+sync-versions ...
+repo-tools sync-versions ...
+python -m scitrera_repo_tools sync-versions ...
+```
+
+Drop-in shims live in `scripts/` (`update-versions.py`, `npm-audit.py`,
+`missing-deps.py`, `directory-split.py`). Copy any of them into a target repo
+and they will use the installed package if available, otherwise fall back to
+`uvx` and finally print install instructions.
+
+## `sync-versions`
 
 From any directory inside a monorepo containing a `versions.yaml`:
 
@@ -88,15 +104,48 @@ go_toolchain:
   toolchain: "1.25.10"   # rewrites `toolchain goX.Y.Z` (Go 1.21+ feature)
 ```
 
-## Releases
+## `npm-audit`
 
-Releases are automated via GitHub Actions on tag push (`v*.*.*`):
+Runs `npm audit` (and optionally `npm audit fix`) across every TypeScript
+package declared in `versions.yaml` (i.e. every `project_rules` entry with a
+`type: package` rule). Mirrors the bash convention of bailing on missing
+lockfiles, auto-running `npm ci` when `node_modules` is absent, and returning
+a non-zero exit on any audit failure.
 
-1. CI runs the test suite on Python 3.11/3.12/3.13.
-2. A guard step asserts the tag matches `pyproject.toml`'s `[project].version`.
-3. `python -m build` produces an sdist + wheel.
-4. The artifacts are published to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/) (OIDC; no API token).
-5. A GitHub Release is created with the artifacts attached.
+```bash
+npm-audit                          # audit every TS project
+npm-audit --fix                    # non-breaking fix + audit
+npm-audit --fix --force            # include breaking fixes
+npm-audit --level high             # high + critical only
+npm-audit my-ts-pkg another-ts-pkg # subset by versions.yaml project name
+```
+
+## `missing-deps`
+
+Reads `pyproject.toml` and prints declared dependencies that are not yet
+installed in the current environment. Useful for piping into a selective
+`pip install` without re-resolving the full graph.
+
+```bash
+missing-deps                       # print missing deps from [project].dependencies
+missing-deps --extra test          # also include the `[test]` extra
+missing-deps --ignore some-pkg     # skip specific packages
+missing-deps --print-installed     # report installed versions to stderr
+```
+
+## `directory-split`
+
+Splits a directory into N approximately-equal buckets via greedy bin-packing.
+Top-level entries are treated as atomic units; top-level *directories* go one
+level deeper so their children can spread across buckets (preventing one large
+dir from dominating). Output: `<parent>/<basename>-1` … `<parent>/<basename>-N`.
+Deterministic for fixed inputs.
+
+```bash
+directory-split ./data 4                       # split into 4 buckets
+directory-split ./data 4 --exclude "*.log"     # skip log files at top level
+directory-split ./data 4 --exclude .git --exclude node_modules
+```
 
 ## License
 
