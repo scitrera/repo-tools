@@ -1,5 +1,8 @@
 """pyproject.toml strategy: version field + dependency rewrite helpers."""
 
+#  Copyright (c) 2026. Scitrera LLC. Licensed under 3-clause BSD license
+#  (see LICENSE file at https://github.com/scitrera/repo-tools/blob/main/LICENSE)
+
 from __future__ import annotations
 
 import logging
@@ -43,12 +46,19 @@ def _make_pyproject_dep_re(dep_name: str) -> "re.Pattern[str]":
     # Matches a quoted PEP 508 dep string such as:
     #   "pkg>=1.0"  'pkg[extra]==2.0,<3'  "pkg ~= 1.2 ; python_version<'3.12'"
     # Capture groups:
-    #   1: opening quote + dep name + optional [extras] + optional whitespace
-    #   2: existing version spec (everything up to ';' or closing quote)
-    #   3: trailing marker / closing quote portion
+    #   q: opening (and closing) quote
+    #   prefix: dep name + optional [extras] + optional whitespace
+    #   spec:   existing version spec (everything up to ';' or closing quote)
+    #   tail:   trailing marker / closing quote portion
+    #
+    # The negative lookahead `(?![A-Za-z0-9._-])` after the name (and optional
+    # extras) prevents partial matches like `dep_name="pytest"` accidentally
+    # matching `"pytest-asyncio>=0.23"` — `-` is a valid PEP 508 name char so
+    # without this guard the substring `pytest` matches and `-asyncio>=0.23`
+    # gets swallowed as the spec.
     escaped = re.escape(dep_name)
     return re.compile(
-        rf'''(?P<q>["'])(?P<prefix>{escaped}(?:\[[^\]]*\])?\s*)'''
+        rf'''(?P<q>["'])(?P<prefix>{escaped}(?:\[[^\]]*\])?(?![A-Za-z0-9._-])\s*)'''
         rf'''(?P<spec>[^"';]*)'''
         rf'''(?P<tail>(?:;[^"']*)?)(?P=q)''',
     )
