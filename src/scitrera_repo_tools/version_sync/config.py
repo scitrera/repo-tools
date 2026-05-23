@@ -1,5 +1,8 @@
 """versions.yaml schema validation and dataclasses."""
 
+#  Copyright (c) 2026. Scitrera LLC. Licensed under 3-clause BSD license
+#  (see LICENSE file at https://github.com/scitrera/repo-tools/blob/main/LICENSE)
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -16,6 +19,7 @@ RESERVED_KEYS = (
     "dependency_mappings",
     "sources",
     "go_toolchain",
+    "ci",
 )
 
 
@@ -84,6 +88,33 @@ class GoToolchainConfig:
 
 
 @dataclass(frozen=True)
+class CiPythonConfig:
+    """Per-language CI knobs for python flows."""
+    test_versions: tuple = ("3.11", "3.12", "3.13")
+    lint: str = "ruff"                              # "ruff" | "none"
+    install: str = 'pip install -e ".[test]"'
+    pypi_environment: str = "pypi"
+
+
+@dataclass(frozen=True)
+class CiNpmConfig:
+    """Per-language CI knobs for npm/typescript flows."""
+    node_version: str = "24"
+    lint: str = "tsc-noemit"                        # "tsc-noemit" | "eslint" | "none"
+    npm_environment: str = "npm"
+    use_provenance: bool = False
+    use_oidc: bool = False
+
+
+@dataclass(frozen=True)
+class CiConfig:
+    """Optional `ci:` block driving the `generate-ci` subcommand."""
+    test_branches: tuple = ("main", "develop")
+    python: CiPythonConfig = field(default_factory=CiPythonConfig)
+    npm: CiNpmConfig = field(default_factory=CiNpmConfig)
+
+
+@dataclass(frozen=True)
 class SyncConfig:
     yaml_path: Path
     root: Path
@@ -93,6 +124,7 @@ class SyncConfig:
     dependency_mappings: DependencyMappings
     sources: SourcesConfig
     go_toolchain: GoToolchainConfig = field(default_factory=lambda: GoToolchainConfig())
+    ci: CiConfig = field(default_factory=CiConfig)
 
 
 def _expect_mapping(value: Any, where: str) -> Dict[str, Any]:
@@ -226,6 +258,77 @@ def _parse_go_toolchain(raw: Any) -> GoToolchainConfig:
     )
 
 
+_CI_PYTHON_LINT_CHOICES = {"ruff", "none"}
+_CI_NPM_LINT_CHOICES = {"tsc-noemit", "eslint", "none"}
+
+
+def _parse_ci_python(raw: Any) -> CiPythonConfig:
+    if raw is None:
+        return CiPythonConfig()
+    block = _expect_mapping(raw, "ci.python")
+    kwargs: Dict[str, Any] = {}
+
+    if "test_versions" in block:
+        vers = block["test_versions"]
+        if not isinstance(vers, list) or not vers:
+            raise ConfigError("ci.python.test_versions: expected non-empty list of strings")
+        kwargs["test_versions"] = tuple(str(v) for v in vers)
+    if "lint" in block:
+        lint = str(block["lint"])
+        if lint not in _CI_PYTHON_LINT_CHOICES:
+            raise ConfigError(
+                f"ci.python.lint: expected one of {sorted(_CI_PYTHON_LINT_CHOICES)}, got '{lint}'"
+            )
+        kwargs["lint"] = lint
+    if "install" in block:
+        kwargs["install"] = str(block["install"])
+    if "pypi_environment" in block:
+        kwargs["pypi_environment"] = str(block["pypi_environment"])
+    return CiPythonConfig(**kwargs)
+
+
+def _parse_ci_npm(raw: Any) -> CiNpmConfig:
+    if raw is None:
+        return CiNpmConfig()
+    block = _expect_mapping(raw, "ci.npm")
+    kwargs: Dict[str, Any] = {}
+
+    if "node_version" in block:
+        kwargs["node_version"] = str(block["node_version"])
+    if "lint" in block:
+        lint = str(block["lint"])
+        if lint not in _CI_NPM_LINT_CHOICES:
+            raise ConfigError(
+                f"ci.npm.lint: expected one of {sorted(_CI_NPM_LINT_CHOICES)}, got '{lint}'"
+            )
+        kwargs["lint"] = lint
+    if "npm_environment" in block:
+        kwargs["npm_environment"] = str(block["npm_environment"])
+    if "use_provenance" in block:
+        kwargs["use_provenance"] = bool(block["use_provenance"])
+    if "use_oidc" in block:
+        kwargs["use_oidc"] = bool(block["use_oidc"])
+    return CiNpmConfig(**kwargs)
+
+
+def _parse_ci(raw: Any) -> CiConfig:
+    if raw is None:
+        return CiConfig()
+    block = _expect_mapping(raw, "ci")
+    kwargs: Dict[str, Any] = {}
+
+    if "test_branches" in block:
+        branches = block["test_branches"]
+        if not isinstance(branches, list) or not branches:
+            raise ConfigError("ci.test_branches: expected non-empty list of branch names")
+        kwargs["test_branches"] = tuple(str(b) for b in branches)
+    if "python" in block:
+        kwargs["python"] = _parse_ci_python(block["python"])
+    if "npm" in block:
+        kwargs["npm"] = _parse_ci_npm(block["npm"])
+    return CiConfig(**kwargs)
+
+
 def _parse_sources(raw: Any) -> SourcesConfig:
     by_lang: Dict[str, List[str]] = {}
     raw_map = _expect_mapping(raw, "sources")
@@ -267,6 +370,7 @@ def load_config(yaml_path: Path, *, root: Optional[Path] = None) -> SyncConfig:
     deps = _parse_dependency_mappings(data.get("dependency_mappings"))
     sources = _parse_sources(data.get("sources"))
     go_toolchain = _parse_go_toolchain(data.get("go_toolchain"))
+    ci = _parse_ci(data.get("ci"))
 
     return SyncConfig(
         yaml_path=yaml_path,
@@ -277,6 +381,7 @@ def load_config(yaml_path: Path, *, root: Optional[Path] = None) -> SyncConfig:
         dependency_mappings=deps,
         sources=sources,
         go_toolchain=go_toolchain,
+        ci=ci,
     )
 
 
@@ -287,6 +392,9 @@ __all__ = [
     "DependencyMappings",
     "SourcesConfig",
     "GoToolchainConfig",
+    "CiPythonConfig",
+    "CiNpmConfig",
+    "CiConfig",
     "SyncConfig",
     "load_config",
     "RESERVED_KEYS",

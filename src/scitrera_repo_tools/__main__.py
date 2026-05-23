@@ -19,6 +19,7 @@ def main() -> None:
             "  npm-audit        Run `npm audit` across every TS package in versions.yaml\n"
             "  missing-deps     Print pyproject.toml deps that are not yet installed\n"
             "  directory-split  Split a directory into N approximately-equal buckets\n"
+            "  generate-ci      Generate GitHub Actions workflows from versions.yaml\n"
         )
         sys.exit(0 if argv else 1)
 
@@ -40,6 +41,10 @@ def main() -> None:
     elif subcommand == "directory-split":
         from scitrera_repo_tools.directory_split import main as dir_split_main
         sys.exit(dir_split_main(remaining))
+    elif subcommand == "generate-ci":
+        from scitrera_repo_tools.ci_gen.cli import main as ci_main
+        sys.argv = ["generate-ci", *remaining]
+        ci_main()
     else:
         print(f"unknown subcommand: {subcommand}", file=sys.stderr)
         sys.exit(2)

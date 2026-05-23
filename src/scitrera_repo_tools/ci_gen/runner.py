@@ -1,0 +1,141 @@
+"""Orchestrate generate-vs-disk diff + write for the `generate-ci` subcommand."""
+
+#  Copyright (c) 2026. Scitrera LLC. Licensed under 3-clause BSD license
+#  (see LICENSE file at https://github.com/scitrera/repo-tools/blob/main/LICENSE)
+
+from __future__ import annotations
+
+import difflib
+import logging
+import sys
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Dict, List
+
+from ..version_sync.config import SyncConfig
+from .templates import render_all
+
+logger = logging.getLogger("scitrera_repo_tools.ci_gen")
+
+
+class State(str, Enum):
+    OK = "ok"            # file on disk matches the generator
+    MISSING = "missing"  # file would be created
+    DRIFT = "drift"      # file on disk differs
+
+
+@dataclass(frozen=True)
+class FileResult:
+    filename: str
+    state: State
+    desired: str
+    existing: str  # "" when missing
+
+
+def _classify(workflows_dir: Path, rendered: Dict[str, str]) -> List[FileResult]:
+    results: List[FileResult] = []
+    for filename, desired in rendered.items():
+        path = workflows_dir / filename
+        if not desired:
+            # Generator produced empty (e.g. no python projects) → skip entirely.
+            continue
+        if not path.exists():
+            results.append(FileResult(filename, State.MISSING, desired, ""))
+            continue
+        existing = path.read_text(encoding="utf-8")
+        if existing == desired:
+            results.append(FileResult(filename, State.OK, desired, existing))
+        else:
+            results.append(FileResult(filename, State.DRIFT, desired, existing))
+    return results
+
+
+def _print_diff(result: FileResult) -> None:
+    diff = difflib.unified_diff(
+        result.existing.splitlines(keepends=True),
+        result.desired.splitlines(keepends=True),
+        fromfile=f"a/{result.filename}",
+        tofile=f"b/{result.filename}",
+        n=3,
+    )
+    sys.stdout.write("".join(diff))
+
+
+def run(
+    config: SyncConfig,
+    *,
+    workflows_dir: Path,
+    force: bool,
+    check_only: bool,
+) -> int:
+    """Execute generate-ci.
+
+    Semantics:
+    - First pass through `_classify`: bucket each workflow into ok / missing / drift.
+    - When `check_only` is True, never writes anything; exits 1 if missing or drift.
+    - When `force` is True, writes both missing and drift files.
+    - Default (neither flag): writes only missing files, prints diff for drift,
+      exits 1 if any drift exists. This makes the no-flag invocation safe to
+      run repeatedly (first time creates, subsequent times check).
+    """
+    rendered = render_all(config)
+    results = _classify(workflows_dir, rendered)
+
+    missing = [r for r in results if r.state is State.MISSING]
+    drift = [r for r in results if r.state is State.DRIFT]
+    ok = [r for r in results if r.state is State.OK]
+
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+
+    wrote: List[str] = []
+
+    if not check_only:
+        for r in missing:
+            (workflows_dir / r.filename).write_text(r.desired, encoding="utf-8")
+            wrote.append(r.filename)
+
+    if force and not check_only:
+        for r in drift:
+            (workflows_dir / r.filename).write_text(r.desired, encoding="utf-8")
+            wrote.append(r.filename)
+
+    # Report.
+    for r in ok:
+        logger.info("  %-22s in sync", r.filename)
+    for r in missing:
+        if check_only:
+            logger.info("  %-22s would be created", r.filename)
+        else:
+            logger.info("  %-22s created", r.filename)
+    for r in drift:
+        if force and not check_only:
+            logger.info("  %-22s overwritten", r.filename)
+        else:
+            logger.warning("  %-22s drift detected", r.filename)
+            _print_diff(r)
+
+    if wrote:
+        logger.info("Wrote %d workflow file(s) to %s.", len(wrote), workflows_dir)
+
+    drift_remaining = drift and not (force and not check_only)
+    missing_remaining = missing and check_only
+
+    if drift_remaining:
+        logger.warning(
+            "%d workflow(s) drifted from the generator output. "
+            "Re-run with `generate-ci --force` to overwrite.",
+            len(drift),
+        )
+    if missing_remaining:
+        logger.warning(
+            "%d workflow(s) would be created. Re-run without `--check` to write.",
+            len(missing),
+        )
+
+    if drift_remaining or missing_remaining:
+        return 1
+    return 0
+
+
+__all__ = ["run", "State", "FileResult"]

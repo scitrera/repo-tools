@@ -147,6 +147,61 @@ directory-split ./data 4 --exclude "*.log"     # skip log files at top level
 directory-split ./data 4 --exclude .git --exclude node_modules
 ```
 
+## `generate-ci`
+
+Generates GitHub Actions workflows from `versions.yaml`. Produces up to five
+files in `.github/workflows/`:
+
+| File | Trigger | Purpose |
+|---|---|---|
+| `version-check.yml` | PR (paths-filtered) | Fail PRs that drift from `versions.yaml` |
+| `test-python.yml` | push/PR to `test_branches` | Matrix test across Python versions, per project |
+| `test-npm.yml` | push/PR to `test_branches` | Per-TS-project install + type-check + `npm test` |
+| `publish-python.yml` | tag `v*.*.*` push | Per-project PyPI publish in dependency order |
+| `publish-npm.yml` | tag `v*.*.*` push | Per-project npm publish in dependency order |
+
+The publish workflows respect the DAG defined by
+`dependency_mappings.<lang>.dependencies` — every consumer's job declares
+`needs: [publish-<dep>, ...]` so internal deps publish first. Both publish
+workflows run `sync-versions --release` inline to rewrite local refs
+(`workspace:`, `file:`, `git+...`, PEP 508 direct refs) into version pins
+before building, so published artifacts are installable from PyPI/npm
+without the original repo checkout.
+
+### Behavior
+
+```bash
+generate-ci             # write missing files; show unified diff for drift; exit 1 on drift
+generate-ci --force     # overwrite drift
+generate-ci --check     # never write; CI-friendly drift detector
+```
+
+Default (no flags) creates files on first run in a fresh repo, and acts as
+a drift check on subsequent runs — safe to wire into CI.
+
+### `ci:` block in `versions.yaml`
+
+All keys optional; sensible defaults applied for anything you omit.
+
+```yaml
+ci:
+  test_branches: [main, develop]              # default: [main, develop]
+  python:
+    test_versions: ["3.11", "3.12", "3.13"]   # default
+    lint: ruff                                  # ruff | none; default: ruff
+    install: 'pip install -e ".[test]"'         # default
+    pypi_environment: pypi                      # GitHub environment, default: pypi
+  npm:
+    node_version: "24"                          # default: "24"
+    lint: tsc-noemit                            # tsc-noemit | eslint | none
+    npm_environment: npm                        # default: npm
+    use_provenance: false                       # add --provenance to npm publish
+    use_oidc: false                             # skip NPM_TOKEN (trusted publisher)
+```
+
+If a language has no `project_rules` entries (no `type: pyproject` /
+`type: package` rules), its workflows are simply not generated.
+
 ## License
 
 BSD 3-Clause.
