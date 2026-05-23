@@ -20,6 +20,7 @@ RESERVED_KEYS = (
     "sources",
     "go_toolchain",
     "ci",
+    "docker",
 )
 
 
@@ -107,11 +108,71 @@ class CiNpmConfig:
 
 
 @dataclass(frozen=True)
+class CiGoConfig:
+    """Per-language CI knobs for go flows."""
+    go_version: Optional[str] = None        # default: derive from go_toolchain.go, else "1.25"
+    lint: str = "golangci-lint"              # "golangci-lint" | "none"
+    golangci_version: str = "v2.11.4"
+    enable_govulncheck: bool = True
+    test_args: str = "-race -count=1"
+
+
+@dataclass(frozen=True)
+class CiDockerConfig:
+    """CI knobs for docker workflows."""
+    default_platforms: tuple = ("linux/amd64", "linux/arm64")
+    # Mapping of platform → runner; linux/amd64 defaults to ubuntu-latest implicitly.
+    platform_runners: Mapping[str, str] = field(
+        default_factory=lambda: {"linux/amd64": "ubuntu-latest"}
+    )
+    build_on_pr: bool = False
+    enable_workflow_dispatch_version: bool = True
+    # Which language test job sets to inline ahead of build jobs.
+    test_prereqs: tuple = ("python", "npm", "go")
+
+
+@dataclass(frozen=True)
 class CiConfig:
-    """Optional `ci:` block driving the `generate-ci` subcommand."""
+    """Optional `ci:` block driving the `generate-ci-gha` subcommand."""
     test_branches: tuple = ("main", "develop")
+    # Workflow basenames (no .yml) to skip entirely. Use when a generated
+    # workflow has been hand-customized and you want the generator to stop
+    # managing it. The on-disk file is left untouched and no drift is reported.
+    skip_workflows: tuple = ()
     python: CiPythonConfig = field(default_factory=CiPythonConfig)
     npm: CiNpmConfig = field(default_factory=CiNpmConfig)
+    go: CiGoConfig = field(default_factory=CiGoConfig)
+    docker: CiDockerConfig = field(default_factory=CiDockerConfig)
+
+
+@dataclass(frozen=True)
+class DockerImage:
+    """A single docker image build descriptor.
+
+    `needs` is a single parent image name (or None). Multi-parent cascades
+    are not supported in v1 (parser rejects list-valued `needs:`).
+    """
+    name: str
+    context: str
+    dockerfile: str
+    tag_style: str = "standard"              # "standard" | "dev"
+    platforms: Optional[tuple] = None        # default: ci.docker.default_platforms
+    needs: Optional[str] = None
+    version_from: Optional[str] = None
+    base_image_arg: str = "BASE_IMAGE"
+    build_strategy: str = "auto"             # "auto" | "qemu" | "native"
+
+
+@dataclass(frozen=True)
+class DockerConfig:
+    """Optional `docker:` block driving the docker-build workflow."""
+    ghcr: Optional[str] = None
+    dockerhub: Optional[str] = None
+    images: Mapping[str, DockerImage] = field(default_factory=dict)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.images
 
 
 @dataclass(frozen=True)
@@ -125,6 +186,7 @@ class SyncConfig:
     sources: SourcesConfig
     go_toolchain: GoToolchainConfig = field(default_factory=lambda: GoToolchainConfig())
     ci: CiConfig = field(default_factory=CiConfig)
+    docker: DockerConfig = field(default_factory=DockerConfig)
 
 
 def _expect_mapping(value: Any, where: str) -> Dict[str, Any]:
@@ -260,6 +322,10 @@ def _parse_go_toolchain(raw: Any) -> GoToolchainConfig:
 
 _CI_PYTHON_LINT_CHOICES = {"ruff", "none"}
 _CI_NPM_LINT_CHOICES = {"tsc-noemit", "eslint", "none"}
+_CI_GO_LINT_CHOICES = {"golangci-lint", "none"}
+_DOCKER_TAG_STYLES = {"standard", "dev"}
+_DOCKER_BUILD_STRATEGIES = {"auto", "qemu", "native"}
+_DOCKER_TEST_PREREQ_CHOICES = {"python", "npm", "go"}
 
 
 def _parse_ci_python(raw: Any) -> CiPythonConfig:
@@ -311,6 +377,67 @@ def _parse_ci_npm(raw: Any) -> CiNpmConfig:
     return CiNpmConfig(**kwargs)
 
 
+def _parse_ci_go(raw: Any) -> CiGoConfig:
+    if raw is None:
+        return CiGoConfig()
+    block = _expect_mapping(raw, "ci.go")
+    kwargs: Dict[str, Any] = {}
+
+    if "go_version" in block:
+        kwargs["go_version"] = str(block["go_version"])
+    if "lint" in block:
+        lint = str(block["lint"])
+        if lint not in _CI_GO_LINT_CHOICES:
+            raise ConfigError(
+                f"ci.go.lint: expected one of {sorted(_CI_GO_LINT_CHOICES)}, got '{lint}'"
+            )
+        kwargs["lint"] = lint
+    if "golangci_version" in block:
+        kwargs["golangci_version"] = str(block["golangci_version"])
+    if "enable_govulncheck" in block:
+        kwargs["enable_govulncheck"] = bool(block["enable_govulncheck"])
+    if "test_args" in block:
+        kwargs["test_args"] = str(block["test_args"])
+    return CiGoConfig(**kwargs)
+
+
+def _parse_ci_docker(raw: Any) -> CiDockerConfig:
+    if raw is None:
+        return CiDockerConfig()
+    block = _expect_mapping(raw, "ci.docker")
+    kwargs: Dict[str, Any] = {}
+
+    if "default_platforms" in block:
+        plats = block["default_platforms"]
+        if not isinstance(plats, list) or not plats:
+            raise ConfigError("ci.docker.default_platforms: expected non-empty list")
+        kwargs["default_platforms"] = tuple(str(p) for p in plats)
+    if "platform_runners" in block:
+        runners = _expect_mapping(block["platform_runners"], "ci.docker.platform_runners")
+        # linux/amd64 → ubuntu-latest is always available; user can override.
+        merged = {"linux/amd64": "ubuntu-latest"}
+        merged.update({str(k): str(v) for k, v in runners.items()})
+        kwargs["platform_runners"] = merged
+    if "build_on_pr" in block:
+        kwargs["build_on_pr"] = bool(block["build_on_pr"])
+    if "enable_workflow_dispatch_version" in block:
+        kwargs["enable_workflow_dispatch_version"] = bool(
+            block["enable_workflow_dispatch_version"]
+        )
+    if "test_prereqs" in block:
+        prereqs = block["test_prereqs"]
+        if not isinstance(prereqs, list):
+            raise ConfigError("ci.docker.test_prereqs: expected list")
+        unknown = [p for p in prereqs if p not in _DOCKER_TEST_PREREQ_CHOICES]
+        if unknown:
+            raise ConfigError(
+                f"ci.docker.test_prereqs: unknown entries {unknown}, "
+                f"expected one of {sorted(_DOCKER_TEST_PREREQ_CHOICES)}"
+            )
+        kwargs["test_prereqs"] = tuple(str(p) for p in prereqs)
+    return CiDockerConfig(**kwargs)
+
+
 def _parse_ci(raw: Any) -> CiConfig:
     if raw is None:
         return CiConfig()
@@ -322,11 +449,109 @@ def _parse_ci(raw: Any) -> CiConfig:
         if not isinstance(branches, list) or not branches:
             raise ConfigError("ci.test_branches: expected non-empty list of branch names")
         kwargs["test_branches"] = tuple(str(b) for b in branches)
+    if "skip_workflows" in block:
+        skip = block["skip_workflows"]
+        if not isinstance(skip, list):
+            raise ConfigError(
+                "ci.skip_workflows: expected list of workflow basenames (no .yml)"
+            )
+        kwargs["skip_workflows"] = tuple(str(s) for s in skip)
     if "python" in block:
         kwargs["python"] = _parse_ci_python(block["python"])
     if "npm" in block:
         kwargs["npm"] = _parse_ci_npm(block["npm"])
+    if "go" in block:
+        kwargs["go"] = _parse_ci_go(block["go"])
+    if "docker" in block:
+        kwargs["docker"] = _parse_ci_docker(block["docker"])
     return CiConfig(**kwargs)
+
+
+def _parse_docker_image(name: str, raw: Any) -> DockerImage:
+    block = _expect_mapping(raw, f"docker.images.{name}")
+    if "context" not in block or not isinstance(block["context"], str):
+        raise ConfigError(f"docker.images.{name}.context: required string")
+    if "dockerfile" not in block or not isinstance(block["dockerfile"], str):
+        raise ConfigError(f"docker.images.{name}.dockerfile: required string")
+    kwargs: Dict[str, Any] = {
+        "name": name,
+        "context": block["context"],
+        "dockerfile": block["dockerfile"],
+    }
+    if "tag_style" in block:
+        ts = str(block["tag_style"])
+        if ts not in _DOCKER_TAG_STYLES:
+            raise ConfigError(
+                f"docker.images.{name}.tag_style: expected one of "
+                f"{sorted(_DOCKER_TAG_STYLES)}, got '{ts}'"
+            )
+        kwargs["tag_style"] = ts
+    if "platforms" in block:
+        plats = block["platforms"]
+        if not isinstance(plats, list) or not plats:
+            raise ConfigError(
+                f"docker.images.{name}.platforms: expected non-empty list"
+            )
+        kwargs["platforms"] = tuple(str(p) for p in plats)
+    if "needs" in block:
+        needs = block["needs"]
+        if isinstance(needs, list):
+            raise ConfigError(
+                f"docker.images.{name}.needs: multi-parent cascades are not "
+                "supported in v1; use a single string"
+            )
+        if needs is not None:
+            kwargs["needs"] = str(needs)
+    if "version_from" in block:
+        kwargs["version_from"] = str(block["version_from"])
+    if "base_image_arg" in block:
+        kwargs["base_image_arg"] = str(block["base_image_arg"])
+    if "build_strategy" in block:
+        bs = str(block["build_strategy"])
+        if bs not in _DOCKER_BUILD_STRATEGIES:
+            raise ConfigError(
+                f"docker.images.{name}.build_strategy: expected one of "
+                f"{sorted(_DOCKER_BUILD_STRATEGIES)}, got '{bs}'"
+            )
+        kwargs["build_strategy"] = bs
+    return DockerImage(**kwargs)
+
+
+def _parse_docker(raw: Any, project_versions: Mapping[str, str]) -> DockerConfig:
+    if raw is None:
+        return DockerConfig()
+    block = _expect_mapping(raw, "docker")
+    kwargs: Dict[str, Any] = {}
+
+    if "ghcr" in block and block["ghcr"] is not None:
+        kwargs["ghcr"] = str(block["ghcr"])
+    if "dockerhub" in block and block["dockerhub"] is not None:
+        kwargs["dockerhub"] = str(block["dockerhub"])
+
+    images_raw = block.get("images")
+    if images_raw is None:
+        return DockerConfig(**kwargs)
+    images_map = _expect_mapping(images_raw, "docker.images")
+    images: Dict[str, DockerImage] = {}
+    for img_name, img_block in images_map.items():
+        images[str(img_name)] = _parse_docker_image(str(img_name), img_block)
+
+    # Cross-image validation: every needs target must refer to a defined image.
+    image_names = set(images)
+    for img in images.values():
+        if img.needs is not None and img.needs not in image_names:
+            raise ConfigError(
+                f"docker.images.{img.name}.needs: parent image "
+                f"'{img.needs}' is not defined in docker.images"
+            )
+        if img.version_from is not None and img.version_from not in project_versions:
+            raise ConfigError(
+                f"docker.images.{img.name}.version_from: '{img.version_from}' "
+                "is not a known project in versions.yaml"
+            )
+
+    kwargs["images"] = images
+    return DockerConfig(**kwargs)
 
 
 def _parse_sources(raw: Any) -> SourcesConfig:
@@ -371,6 +596,7 @@ def load_config(yaml_path: Path, *, root: Optional[Path] = None) -> SyncConfig:
     sources = _parse_sources(data.get("sources"))
     go_toolchain = _parse_go_toolchain(data.get("go_toolchain"))
     ci = _parse_ci(data.get("ci"))
+    docker = _parse_docker(data.get("docker"), project_versions)
 
     return SyncConfig(
         yaml_path=yaml_path,
@@ -382,6 +608,7 @@ def load_config(yaml_path: Path, *, root: Optional[Path] = None) -> SyncConfig:
         sources=sources,
         go_toolchain=go_toolchain,
         ci=ci,
+        docker=docker,
     )
 
 
@@ -394,7 +621,11 @@ __all__ = [
     "GoToolchainConfig",
     "CiPythonConfig",
     "CiNpmConfig",
+    "CiGoConfig",
+    "CiDockerConfig",
     "CiConfig",
+    "DockerImage",
+    "DockerConfig",
     "SyncConfig",
     "load_config",
     "RESERVED_KEYS",

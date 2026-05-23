@@ -38,6 +38,7 @@ sync-versions = "scitrera_repo_tools.version_sync.cli:main"
 npm-audit = "scitrera_repo_tools.npm_audit.cli:main"
 missing-deps = "scitrera_repo_tools.missing_deps:main"
 directory-split = "scitrera_repo_tools.directory_split:main"
+generate-ci-gha = "scitrera_repo_tools.ci_gen_gha.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/scitrera/repo-tools"

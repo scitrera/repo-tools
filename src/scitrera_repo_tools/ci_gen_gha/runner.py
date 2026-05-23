@@ -1,4 +1,4 @@
-"""Orchestrate generate-vs-disk diff + write for the `generate-ci` subcommand."""
+"""Orchestrate generate-vs-disk diff + write for the `generate-ci-gha` subcommand."""
 
 #  Copyright (c) 2026. Scitrera LLC. Licensed under 3-clause BSD license
 #  (see LICENSE file at https://github.com/scitrera/repo-tools/blob/main/LICENSE)
@@ -16,7 +16,7 @@ from typing import Dict, List
 from ..version_sync.config import SyncConfig
 from .templates import render_all
 
-logger = logging.getLogger("scitrera_repo_tools.ci_gen")
+logger = logging.getLogger("scitrera_repo_tools.ci_gen_gha")
 
 
 class State(str, Enum):
@@ -69,7 +69,7 @@ def run(
     force: bool,
     check_only: bool,
 ) -> int:
-    """Execute generate-ci.
+    """Execute generate-ci-gha.
 
     Semantics:
     - First pass through `_classify`: bucket each workflow into ok / missing / drift.
@@ -80,7 +80,16 @@ def run(
       run repeatedly (first time creates, subsequent times check).
     """
     rendered = render_all(config)
+
+    # Honor ci.skip_workflows — drop those entries entirely so the generator
+    # doesn't manage them. The on-disk file (if any) is left untouched.
+    skip = {f"{n}.yml" for n in config.ci.skip_workflows}
+    skipped = sorted(set(rendered).intersection(skip))
+    rendered = {k: v for k, v in rendered.items() if k not in skip}
+
     results = _classify(workflows_dir, rendered)
+    for filename in skipped:
+        logger.info("  %-22s skipped (ci.skip_workflows)", filename)
 
     missing = [r for r in results if r.state is State.MISSING]
     drift = [r for r in results if r.state is State.DRIFT]
@@ -124,7 +133,7 @@ def run(
     if drift_remaining:
         logger.warning(
             "%d workflow(s) drifted from the generator output. "
-            "Re-run with `generate-ci --force` to overwrite.",
+            "Re-run with `generate-ci-gha --force` to overwrite.",
             len(drift),
         )
     if missing_remaining:

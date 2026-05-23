@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drop-in shim for scitrera-repo-tools `generate-ci`.
+"""Drop-in shim for scitrera-repo-tools `generate-ci-gha`.
 
 Copy this file into any repo's `scripts/` directory (or run it from anywhere)
 to generate GitHub Actions workflows from that repo's `versions.yaml`.
@@ -15,11 +15,11 @@ Resolution order:
   3. Otherwise  ->  print install instructions and exit 1.
 
 Usage:
-    python scripts/generate-ci.py            # write missing, diff drift, exit 1 on drift
-    python scripts/generate-ci.py --force    # overwrite drift
-    python scripts/generate-ci.py --check    # never write; CI-friendly drift detector
+    python scripts/generate-ci-gha.py            # write missing, diff drift, exit 1 on drift
+    python scripts/generate-ci-gha.py --force    # overwrite drift
+    python scripts/generate-ci-gha.py --check    # never write; CI-friendly drift detector
 
-All flags pass through to `generate-ci`.
+All flags pass through to `generate-ci-gha`.
 """
 
 #  Copyright (c) 2026. Scitrera LLC. Licensed under 3-clause BSD license
@@ -43,18 +43,18 @@ def _try_uvx(args: List[str]) -> None:
     source = os.environ.get("REPO_TOOLS_SOURCE", DEFAULT_SOURCE)
     name = os.path.basename(uv)
     if name == "uv":
-        cmd = [uv, "tool", "run", "--from", source, "generate-ci", *args]
+        cmd = [uv, "tool", "run", "--from", source, "generate-ci-gha", *args]
     else:
-        cmd = [uv, "--from", source, "generate-ci", *args]
+        cmd = [uv, "--from", source, "generate-ci-gha", *args]
     os.execvp(cmd[0], cmd)  # never returns
 
 
 def _try_import(args: List[str]) -> bool:
     try:
-        from scitrera_repo_tools.ci_gen.cli import main as ci_main
+        from scitrera_repo_tools.ci_gen_gha.cli import main as ci_main
     except ImportError:
         return False
-    sys.argv = ["generate-ci", *args]
+    sys.argv = ["generate-ci-gha", *args]
     ci_main()
     return True
 

@@ -1,4 +1,4 @@
-"""Runner: write/check/diff semantics for generate-ci."""
+"""Runner: write/check/diff semantics for generate-ci-gha."""
 
 #  Copyright (c) 2026. Scitrera LLC. Licensed under 3-clause BSD license
 #  (see LICENSE file at https://github.com/scitrera/repo-tools/blob/main/LICENSE)
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from scitrera_repo_tools.ci_gen.runner import run
+from scitrera_repo_tools.ci_gen_gha.runner import run
 from scitrera_repo_tools.version_sync.config import load_config
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scitrera_repo_tools.ci_gen.templates import (
+from scitrera_repo_tools.ci_gen_gha.templates import (
     build_publish_npm,
     build_publish_python,
     build_test_npm,

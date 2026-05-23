@@ -147,18 +147,21 @@ directory-split ./data 4 --exclude "*.log"     # skip log files at top level
 directory-split ./data 4 --exclude .git --exclude node_modules
 ```
 
-## `generate-ci`
+## `generate-ci-gha`
 
-Generates GitHub Actions workflows from `versions.yaml`. Produces up to five
-files in `.github/workflows/`:
+Generates GitHub Actions workflows from `versions.yaml`. Produces up to seven
+files in `.github/workflows/` depending on which languages and image
+descriptors are present:
 
 | File | Trigger | Purpose |
 |---|---|---|
 | `version-check.yml` | PR (paths-filtered) | Fail PRs that drift from `versions.yaml` |
 | `test-python.yml` | push/PR to `test_branches` | Matrix test across Python versions, per project |
 | `test-npm.yml` | push/PR to `test_branches` | Per-TS-project install + type-check + `npm test` |
+| `test-go.yml` | push/PR to `test_branches` | `go vet` + race-test + optional golangci-lint / govulncheck per Go project |
 | `publish-python.yml` | tag `v*.*.*` push | Per-project PyPI publish in dependency order |
 | `publish-npm.yml` | tag `v*.*.*` push | Per-project npm publish in dependency order |
+| `build-docker.yml` | tag `v*.*.*` push + dispatch | Cascaded multi-arch image builds with inline test prereqs |
 
 The publish workflows respect the DAG defined by
 `dependency_mappings.<lang>.dependencies` — every consumer's job declares
@@ -171,9 +174,9 @@ without the original repo checkout.
 ### Behavior
 
 ```bash
-generate-ci             # write missing files; show unified diff for drift; exit 1 on drift
-generate-ci --force     # overwrite drift
-generate-ci --check     # never write; CI-friendly drift detector
+generate-ci-gha             # write missing files; show unified diff for drift; exit 1 on drift
+generate-ci-gha --force     # overwrite drift
+generate-ci-gha --check     # never write; CI-friendly drift detector
 ```
 
 Default (no flags) creates files on first run in a fresh repo, and acts as
@@ -186,6 +189,7 @@ All keys optional; sensible defaults applied for anything you omit.
 ```yaml
 ci:
   test_branches: [main, develop]              # default: [main, develop]
+  skip_workflows: []                          # workflow basenames (no .yml) to leave unmanaged
   python:
     test_versions: ["3.11", "3.12", "3.13"]   # default
     lint: ruff                                  # ruff | none; default: ruff
@@ -197,10 +201,86 @@ ci:
     npm_environment: npm                        # default: npm
     use_provenance: false                       # add --provenance to npm publish
     use_oidc: false                             # skip NPM_TOKEN (trusted publisher)
+  go:
+    go_version: "1.25.10"                       # default: from go_toolchain.go, else "1.25"
+    lint: golangci-lint                          # golangci-lint | none; default: golangci-lint
+    golangci_version: "v2.11.4"
+    enable_govulncheck: true                    # default: true
+    test_args: "-race -count=1"
+  docker:
+    default_platforms: [linux/amd64, linux/arm64]
+    platform_runners:                           # native runners; missing platforms fall back to QEMU
+      linux/amd64: ubuntu-latest                # implicit; included by default
+      linux/arm64: ubuntu-24.04-arm             # opt-in to native arm64 builds
+    build_on_pr: false                          # also build (no push) on PRs
+    enable_workflow_dispatch_version: true       # adds `version` input for redeploys
+    test_prereqs: [python, npm, go]             # which test job sets inline ahead of builds
 ```
 
 If a language has no `project_rules` entries (no `type: pyproject` /
-`type: package` rules), its workflows are simply not generated.
+`type: package` / `type: gomod_require` rules), its workflows are simply
+not generated.
+
+**Skipping a workflow.** If you hand-customize a generated file and want
+the generator to stop managing it, add its basename to `ci.skip_workflows`:
+
+```yaml
+ci:
+  skip_workflows: [build-docker]   # leave .github/workflows/build-docker.yml alone
+```
+
+The on-disk file is never touched and no drift is reported for skipped
+entries — handy when one workflow needs bespoke logic but you still want
+the others auto-synced.
+
+### `docker:` block
+
+Optional. Drives `build-docker.yml`. Omit if the repo doesn't build any
+container images.
+
+```yaml
+docker:
+  ghcr: scitrera                              # optional: ghcr.io/scitrera/<image>
+  dockerhub: scitrera                          # optional: scitrera/<image> (requires DOCKERHUB_USERNAME/_TOKEN secrets)
+  images:
+    aether:
+      context: .
+      dockerfile: server/Dockerfile
+      tag_style: standard                      # standard | dev; default: standard
+      version_from: aether-gateway             # use versions.yaml[aether-gateway] for image tag
+      build_strategy: auto                     # auto | qemu | native; default: auto
+    aetherlite:
+      context: server
+      dockerfile: server/Dockerfile.aetherlite-dev
+      needs: aether                            # cascade: child gets BASE_IMAGE=<reg>/aether:<base-tag>
+      version_from: aether-gateway
+    aetherlite-dev:
+      context: server
+      dockerfile: server/Dockerfile.aetherlite-dev
+      needs: aetherlite
+      tag_style: dev                           # dev- prefixed tags; suppresses :latest
+      version_from: aether-gateway
+      # base_image_arg: BASE_IMAGE             # override the build-arg name (default: BASE_IMAGE)
+```
+
+**Cascade semantics.** When image B `needs: A`, B's build job depends on
+A's build (or merge) job, and `BASE_IMAGE=<primary-registry>/A:<A's base-tag>`
+is injected as a build-arg so B's Dockerfile picks up exactly the image A
+just produced.
+
+**Build strategy.** `auto` (the default) picks `native` when every platform
+listed for the image has an entry in `ci.docker.platform_runners`; otherwise
+it falls back to a single QEMU job. `qemu` and `native` force one path
+explicitly. In `native` mode, the generator emits one job per platform
+(builds + pushes by digest) followed by a `merge-<image>` job that creates
+the multi-arch manifest with `docker buildx imagetools create`.
+
+**Image version source.** When `version_from` references a `versions.yaml`
+project, the build job reads that project's version (via
+`sync-versions --print-version <project>`) and injects it as extra raw
+tags. Without `version_from`, image tags come from the git tag's semver
+value via `docker/metadata-action`. Both sources are overridable at
+runtime by the `workflow_dispatch` `version` input.
 
 ## License
 

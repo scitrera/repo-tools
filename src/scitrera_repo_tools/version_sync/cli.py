@@ -1,5 +1,8 @@
 """CLI entrypoint for `sync-versions`."""
 
+#  Copyright (c) 2026. Scitrera LLC. Licensed under 3-clause BSD license
+#  (see LICENSE file at https://github.com/scitrera/repo-tools/blob/main/LICENSE)
+
 from __future__ import annotations
 
 import argparse
@@ -66,6 +69,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "publishing to PyPI/npm; default behavior preserves local refs."
         ),
     )
+    parser.add_argument(
+        "--print-version",
+        metavar="PROJECT",
+        default=None,
+        help=(
+            "Print the version of PROJECT from versions.yaml to stdout and "
+            "exit. Useful for CI workflows that need to tag artifacts with "
+            "a project's authoritative version. Exits 2 if PROJECT is "
+            "unknown. Suppresses normal sync output."
+        ),
+    )
     return parser
 
 
@@ -105,6 +119,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     except ConfigError as exc:
         logger.error("Configuration error: %s", exc)
         sys.exit(2)
+
+    if args.print_version is not None:
+        version = config.project_versions.get(args.print_version)
+        if version is None:
+            logger.error(
+                "Unknown project '%s' in versions.yaml. Known projects: %s",
+                args.print_version,
+                ", ".join(sorted(config.project_versions)) or "(none)",
+            )
+            sys.exit(2)
+        print(version)
+        sys.exit(0)
 
     sys.exit(
         run(config, check=args.check, verbose=args.verbose, release=args.release)

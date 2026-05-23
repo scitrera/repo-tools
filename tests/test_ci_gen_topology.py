@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from scitrera_repo_tools.ci_gen.topology import publish_order
+from scitrera_repo_tools.ci_gen_gha.topology import publish_order
 from scitrera_repo_tools.version_sync.config import load_config
 
 

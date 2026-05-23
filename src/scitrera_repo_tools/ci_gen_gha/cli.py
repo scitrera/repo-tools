@@ -1,4 +1,4 @@
-"""CLI entrypoint for `generate-ci`."""
+"""CLI entrypoint for `generate-ci-gha`."""
 
 #  Copyright (c) 2026. Scitrera LLC. Licensed under 3-clause BSD license
 #  (see LICENSE file at https://github.com/scitrera/repo-tools/blob/main/LICENSE)
@@ -15,12 +15,12 @@ from ..version_sync.cli import _find_config
 from ..version_sync.config import ConfigError, load_config
 from .runner import run
 
-logger = logging.getLogger("scitrera_repo_tools.ci_gen")
+logger = logging.getLogger("scitrera_repo_tools.ci_gen_gha")
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="generate-ci",
+        prog="generate-ci-gha",
         description=(
             "Generate GitHub Actions workflows from versions.yaml. Without "
             "flags: creates missing files and emits a unified diff for any "
