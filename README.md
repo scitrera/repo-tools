@@ -387,21 +387,25 @@ never as success — GitHub will say "N successful, M cancelled" rather than
 all-green, and a cancelled *required* check can hold up a merge. The duplicate
 has to not exist rather than be killed after it starts.
 
-Concurrency grouping still helps for the ordinary case of pushing twice to the
-same PR in quick succession, where the superseded run *should* be cancelled.
-`github.ref` differs between the two events (`refs/heads/X` vs
-`refs/pull/N/merge`), so a group keyed on it cannot collapse them; the generated
-workflows key on the branch instead:
+If you would rather keep the duplication than lose CI on non-default-branch
+pushes, leave `push_branches` unset. Both runs then complete and **both report
+success** — you pay for the redundant jobs but the PR is unambiguously green.
+That is a reasonable trade; the thing to avoid is the middle ground where the
+duplicate is cancelled instead.
+
+Concurrency grouping is deliberately keyed on `github.ref`, not the branch name:
 
 ```yaml
 concurrency:
-  group: test-go-${{ github.head_ref || github.ref_name }}
+  group: test-go-${{ github.ref }}
   cancel-in-progress: true
 ```
 
-`github.head_ref` is set only for `pull_request`, so both events resolve to the
-same branch name and the redundant run is cancelled rather than run to
-completion.
+`github.ref` is stable across pushes to the same PR (`refs/pull/N/merge`), so
+this still cancels a run that a newer push supersedes — the case where
+cancelling is the right outcome. It intentionally does *not* collapse the
+push/pull_request pair for a single commit, because that produces a cancelled
+check rather than a passing one.
 
 ### Reusing test workflows
 

@@ -122,15 +122,17 @@ def test_ignore_entry_rejects_unknown_keys(tmp_path, write_file):
 
 # ── duplicate-run suppression ─────────────────────────────────────────────────
 
-def test_concurrency_collapses_push_and_pr_runs(tmp_path, write_file):
-    """Pushing to a branch with an open PR fires both events.
+def test_concurrency_cancels_superseded_runs_only(tmp_path, write_file):
+    """Cancel a run the same PR supersedes — not the sibling event of one commit.
 
-    github.ref differs between them, so keying on it leaves two full runs. Keying
-    on the branch name makes them share a group and cancel down to one.
+    github.ref is stable across pushes to a PR (refs/pull/N/merge), so this still
+    collapses rapid successive pushes. It must NOT key on the branch name: that
+    would also cancel the push-vs-pull_request pair for a single commit, and a
+    cancelled run reports as cancelled rather than success. That duplicate is
+    prevented with ci.push_branches instead.
     """
     doc = _doc(tmp_path, write_file, "    lint: none\n")
-    group = doc["concurrency"]["group"]
-    assert group == "test-go-${{ github.head_ref || github.ref_name }}"
+    assert doc["concurrency"]["group"] == "test-go-${{ github.ref }}"
     assert doc["concurrency"]["cancel-in-progress"] is True
 
 
