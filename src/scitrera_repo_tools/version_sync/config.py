@@ -329,6 +329,26 @@ class SyncConfig:
     proto: ProtoConfig = field(default_factory=ProtoConfig)
 
 
+def _reject_unknown(block: Mapping[str, Any], allowed: Iterable[str], where: str) -> None:
+    """Fail on unrecognized keys.
+
+    Stricter than this file's original behavior, which silently ignored keys it
+    did not recognize. A misspelled key reads as configuration that is being
+    honored while doing nothing at all — the failure mode that made a pinned
+    `grpcio-tools` inert and would have let a typo'd `only_workflows` manage
+    every workflow instead of one.
+
+    Note this only protects against typos, not against a *newer* key read by an
+    *older* repo-tools: that version cannot know the key exists. Pinning
+    `ci.repo_tools_source` is what guards against version skew.
+    """
+    unknown = sorted(set(block) - set(allowed))
+    if unknown:
+        raise ConfigError(
+            f"{where}: unknown key(s) {unknown}; expected one of {sorted(allowed)}"
+        )
+
+
 def _expect_mapping(value: Any, where: str) -> Dict[str, Any]:
     if value is None:
         return {}
@@ -461,6 +481,36 @@ def _parse_go_toolchain(raw: Any) -> GoToolchainConfig:
 
 
 _CI_BOOTSTRAP_METHODS = {"uvx", "pip"}
+_CI_KEYS = (
+    "test_branches",
+    "bootstrap_method",
+    "repo_tools_source",
+    "skip_workflows",
+    "only_workflows",
+    "python",
+    "npm",
+    "go",
+    "docker",
+)
+_CI_PYTHON_KEYS = (
+    "test_versions",
+    "lint",
+    "install",
+    "pypi_environment",
+    "publish_requires_tests",
+    "verify_tag_version",
+    "github_release",
+)
+_CI_NPM_KEYS = ("node_version", "lint", "npm_environment", "use_provenance", "use_oidc")
+_CI_GO_KEYS = ("go_version", "lint", "golangci_version", "enable_govulncheck", "test_args")
+_CI_DOCKER_KEYS = (
+    "default_platforms",
+    "platform_runners",
+    "build_on_pr",
+    "enable_workflow_dispatch_version",
+    "test_prereqs",
+)
+
 _CI_PYTHON_LINT_CHOICES = {"ruff", "none"}
 _CI_NPM_LINT_CHOICES = {"tsc-noemit", "eslint", "none"}
 _CI_GO_LINT_CHOICES = {"golangci-lint", "none"}
@@ -473,6 +523,7 @@ def _parse_ci_python(raw: Any, project_versions: Mapping[str, str]) -> CiPythonC
     if raw is None:
         return CiPythonConfig()
     block = _expect_mapping(raw, "ci.python")
+    _reject_unknown(block, _CI_PYTHON_KEYS, "ci.python")
     kwargs: Dict[str, Any] = {}
 
     if "test_versions" in block:
@@ -510,6 +561,7 @@ def _parse_ci_npm(raw: Any) -> CiNpmConfig:
     if raw is None:
         return CiNpmConfig()
     block = _expect_mapping(raw, "ci.npm")
+    _reject_unknown(block, _CI_NPM_KEYS, "ci.npm")
     kwargs: Dict[str, Any] = {}
 
     if "node_version" in block:
@@ -534,6 +586,7 @@ def _parse_ci_go(raw: Any) -> CiGoConfig:
     if raw is None:
         return CiGoConfig()
     block = _expect_mapping(raw, "ci.go")
+    _reject_unknown(block, _CI_GO_KEYS, "ci.go")
     kwargs: Dict[str, Any] = {}
 
     if "go_version" in block:
@@ -558,6 +611,7 @@ def _parse_ci_docker(raw: Any) -> CiDockerConfig:
     if raw is None:
         return CiDockerConfig()
     block = _expect_mapping(raw, "ci.docker")
+    _reject_unknown(block, _CI_DOCKER_KEYS, "ci.docker")
     kwargs: Dict[str, Any] = {}
 
     if "default_platforms" in block:
@@ -595,6 +649,7 @@ def _parse_ci(raw: Any, project_versions: Mapping[str, str]) -> CiConfig:
     if raw is None:
         return CiConfig()
     block = _expect_mapping(raw, "ci")
+    _reject_unknown(block, _CI_KEYS, "ci")
     kwargs: Dict[str, Any] = {}
 
     if "bootstrap_method" in block:
@@ -751,18 +806,6 @@ _PROTO_OUTPUT_KEYS = {
 }
 
 
-def _reject_unknown(block: Mapping[str, Any], allowed: Iterable[str], where: str) -> None:
-    """Fail on unrecognized keys.
-
-    Deliberately stricter than the older blocks in this file: the entire point
-    of the `proto:` block is to stop pins from silently doing nothing, so a
-    typo'd key must be an error rather than a no-op.
-    """
-    unknown = sorted(set(block) - set(allowed))
-    if unknown:
-        raise ConfigError(
-            f"{where}: unknown key(s) {unknown}; expected one of {sorted(allowed)}"
-        )
 
 
 def _proto_version(block: Mapping[str, Any], key: str, where: str) -> Optional[str]:

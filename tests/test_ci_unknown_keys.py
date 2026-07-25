@@ -1,0 +1,84 @@
+"""Unknown-key rejection for the `ci:` block and its sub-blocks."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from scitrera_repo_tools.version_sync.config import ConfigError, load_config
+
+
+def _load(tmp_path: Path, write_file, ci_body: str):
+    write_file(tmp_path / "versions.yaml", f"my-pkg: 0.1.0\n\nci:\n{ci_body}")
+    return load_config(tmp_path / "versions.yaml")
+
+
+@pytest.mark.parametrize("ci_body,where,bad", [
+    ("  test_branchs: [main]\n", "ci", "test_branchs"),
+    ("  repo_tools_srce: x\n", "ci", "repo_tools_srce"),
+    ("  only_workflow: [proto-check]\n", "ci", "only_workflow"),
+    ("  python:\n    test_verisons: ['3.12']\n", "ci.python", "test_verisons"),
+    ("  python:\n    verify_tag: my-pkg\n", "ci.python", "verify_tag"),
+    ("  npm:\n    node_verison: '24'\n", "ci.npm", "node_verison"),
+    ("  go:\n    golangci_ver: v2.0.0\n", "ci.go", "golangci_ver"),
+    ("  docker:\n    platforms: [linux/amd64]\n", "ci.docker", "platforms"),
+])
+def test_unknown_keys_rejected(tmp_path, write_file, ci_body, where, bad):
+    with pytest.raises(ConfigError) as exc:
+        _load(tmp_path, write_file, ci_body)
+    msg = str(exc.value)
+    assert msg.startswith(f"{where}: unknown key(s)")
+    assert bad in msg
+    # The error must name the valid options, not just complain.
+    assert "expected one of" in msg
+
+
+def test_every_documented_key_is_accepted(tmp_path, write_file):
+    """Guard against the rejection list drifting behind the dataclasses."""
+    cfg = _load(tmp_path, write_file, """\
+  test_branches: [main, develop]
+  bootstrap_method: uvx
+  repo_tools_source: "scitrera-repo-tools==1.2.3"
+  skip_workflows: [build-docker]
+  only_workflows: [version-check]
+  python:
+    test_versions: ["3.12"]
+    lint: ruff
+    install: pip install -e .
+    pypi_environment: pypi
+    publish_requires_tests: false
+    verify_tag_version: my-pkg
+    github_release: true
+  npm:
+    node_version: "24"
+    lint: eslint
+    npm_environment: npm
+    use_provenance: true
+    use_oidc: true
+  go:
+    go_version: "1.25"
+    lint: none
+    golangci_version: v2.11.4
+    enable_govulncheck: false
+    test_args: -count=1
+  docker:
+    default_platforms: [linux/amd64]
+    platform_runners: {linux/arm64: ubuntu-24.04-arm}
+    build_on_pr: true
+    enable_workflow_dispatch_version: false
+    test_prereqs: [go]
+""")
+    assert cfg.ci.bootstrap_method == "uvx"
+    assert cfg.ci.only_workflows == ("version-check",)
+    assert cfg.ci.python.github_release is True
+    assert cfg.ci.npm.use_oidc is True
+    assert cfg.ci.go.lint == "none"
+    assert cfg.ci.docker.build_on_pr is True
+
+
+def test_absent_and_empty_ci_still_fine(tmp_path, write_file):
+    write_file(tmp_path / "versions.yaml", "my-pkg: 0.1.0\n")
+    assert load_config(tmp_path / "versions.yaml").ci.test_branches == ("main", "develop")
+    cfg = _load(tmp_path, write_file, "  {}\n")
+    assert cfg.ci.bootstrap_method == "uvx"

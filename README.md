@@ -342,7 +342,14 @@ a drift check on subsequent runs — safe to wire into CI.
 
 ### `ci:` block in `versions.yaml`
 
-All keys optional; sensible defaults applied for anything you omit.
+All keys optional; sensible defaults applied for anything you omit. Unknown keys
+are rejected — in `ci:` and in each of `ci.python` / `ci.npm` / `ci.go` /
+`ci.docker` — because a misspelled key reads as configuration that is being
+honored while doing nothing at all.
+
+This catches typos, not version skew: an *older* repo-tools cannot know about a
+*newer* key and will silently ignore it. Pin `ci.repo_tools_source` when a
+config depends on a recently added key.
 
 ```yaml
 ci:
