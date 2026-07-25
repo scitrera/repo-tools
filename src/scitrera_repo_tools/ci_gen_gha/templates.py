@@ -875,6 +875,16 @@ jobs:
 {jobs}"""
 
 
+def _npm_needs_id_token(npm) -> bool:
+    """Whether the npm publish needs an OIDC token.
+
+    Provenance signing and trusted publishing both mint one; without the
+    permission npm falls back to plain token auth, which a package configured to
+    require 2FA/OIDC will reject with a misleading 404.
+    """
+    return npm.use_provenance or npm.use_oidc
+
+
 def _npm_publish_job(
     project: str,
     project_dir: str,
@@ -901,7 +911,15 @@ def _npm_publish_job(
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 """
 
-    permissions = "      contents: read\n      id-token: write" if npm.use_provenance or npm.use_oidc else "      contents: read"
+    # Job-level `permissions` replaces the workflow-level block outright; it does
+    # not merge. Granting id-token above and omitting it here therefore revokes
+    # it, npm cannot mint an OIDC token, and provenance/trusted publishing
+    # silently degrade to a token-only publish.
+    permissions = (
+        "      contents: read\n      id-token: write"
+        if _npm_needs_id_token(npm)
+        else "      contents: read"
+    )
 
     return f"""  publish-{project}:
     name: Publish {project} to npm
@@ -959,6 +977,11 @@ def build_publish_npm(config: SyncConfig, ci: CiConfig) -> str:
             )
         )
     jobs = "\n".join(parts)
+    workflow_perms = (
+        "  contents: read\n  id-token: write"
+        if _npm_needs_id_token(ci.npm)
+        else "  contents: read"
+    )
 
     return f"""{GENERATED_HEADER}
 name: Publish (npm)
@@ -974,8 +997,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
-  id-token: write
+{workflow_perms}
 
 jobs:
 {jobs}"""

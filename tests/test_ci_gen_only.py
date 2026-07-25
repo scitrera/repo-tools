@@ -142,3 +142,34 @@ def test_npm_publish_inlines_when_test_npm_unmanaged(tmp_path, write_file, write
     assert "tests" not in doc["jobs"]
     assert "test-my-ts" in doc["jobs"]
     assert doc["jobs"]["publish-my-ts"]["needs"] == ["test-my-ts"]
+
+
+# ── npm publish OIDC permissions ──────────────────────────────────────────────
+
+def test_npm_job_permissions_never_narrow_the_workflow_grant(tmp_path, write_file, write_json):
+    """Job-level `permissions` replaces the workflow block; it does not merge.
+
+    Granting id-token at workflow level and omitting it on the job silently
+    revokes it, so npm cannot mint an OIDC token and provenance / trusted
+    publishing degrade to a token-only publish — which a package requiring 2FA
+    rejects with a misleading 404.
+    """
+    import yaml as _yaml
+    from scitrera_repo_tools.ci_gen_gha.templates import build_publish_npm
+
+    for ci_body, want_id_token in (
+        ("  test_branches: [main]\n", False),
+        ("  npm:\n    use_provenance: true\n", True),
+        ("  npm:\n    use_oidc: true\n", True),
+    ):
+        # A fresh repo per case; the fixture's mkdir would collide otherwise.
+        sub = tmp_path / f"case{len(ci_body)}-{want_id_token}"
+        sub.mkdir()
+        cfg = _cfg(sub, write_file, write_json, ci_body)
+        doc = _yaml.safe_load(build_publish_npm(cfg, cfg.ci))
+        wf = doc["permissions"]
+        job = doc["jobs"]["publish-my-ts"]["permissions"]
+        assert ("id-token" in wf) is want_id_token, ci_body
+        assert ("id-token" in job) is want_id_token, ci_body
+        # The job must never hold fewer permissions than the workflow claims.
+        assert set(wf) == set(job), ci_body
