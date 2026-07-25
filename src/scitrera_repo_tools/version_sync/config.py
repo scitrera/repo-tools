@@ -163,6 +163,13 @@ class CiConfig:
     # workflow has been hand-customized and you want the generator to stop
     # managing it. The on-disk file is left untouched and no drift is reported.
     skip_workflows: tuple = ()
+    # Workflow basenames (no .yml) to manage *exclusively*. Empty means "manage
+    # everything that renders". This is the inverse of skip_workflows and the
+    # better fit for incremental adoption: a repo taking on one generated
+    # workflow at a time would otherwise have to enumerate every workflow it
+    # does not want, and revisit that list each time a new generator is added.
+    # Applied before skip_workflows, which can still subtract from it.
+    only_workflows: tuple = ()
     python: CiPythonConfig = field(default_factory=CiPythonConfig)
     npm: CiNpmConfig = field(default_factory=CiNpmConfig)
     go: CiGoConfig = field(default_factory=CiGoConfig)
@@ -620,6 +627,13 @@ def _parse_ci(raw: Any, project_versions: Mapping[str, str]) -> CiConfig:
                 "ci.skip_workflows: expected list of workflow basenames (no .yml)"
             )
         kwargs["skip_workflows"] = tuple(str(s) for s in skip)
+    if "only_workflows" in block:
+        only = block["only_workflows"]
+        if not isinstance(only, list):
+            raise ConfigError(
+                "ci.only_workflows: expected list of workflow basenames (no .yml)"
+            )
+        kwargs["only_workflows"] = tuple(str(s) for s in only)
     if "python" in block:
         kwargs["python"] = _parse_ci_python(block["python"], project_versions)
     if "npm" in block:

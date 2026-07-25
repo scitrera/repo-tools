@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from ..version_sync.config import SyncConfig
-from .templates import render_all
+from .templates import WORKFLOW_GENERATORS, render_all
 
 logger = logging.getLogger("scitrera_repo_tools.ci_gen_gha")
 
@@ -81,13 +81,38 @@ def run(
     """
     rendered = render_all(config)
 
+    known = {name[: -len(".yml")] for name, _ in WORKFLOW_GENERATORS}
+    unknown = sorted(set(config.ci.only_workflows) - known)
+    if unknown:
+        # A typo here would silently manage nothing at all, so it is an error
+        # rather than an empty allowlist that looks like success.
+        logger.error(
+            "ci.only_workflows names unknown workflow(s) %s; expected one of %s",
+            unknown, sorted(known),
+        )
+        return 2
+
+    # Honor ci.only_workflows — an allowlist, so a repo adopting one generated
+    # workflow at a time doesn't have to enumerate every workflow it *doesn't*
+    # want and revisit that list whenever a new generator is added.
+    only = {f"{n}.yml" for n in config.ci.only_workflows}
+    excluded: List[str] = []
+    if only:
+        # Only report entries that would actually have produced a file; listing
+        # workflows the repo has no projects for is noise, not information.
+        excluded = sorted(k for k, v in rendered.items() if v and k not in only)
+        rendered = {k: v for k, v in rendered.items() if k in only}
+
     # Honor ci.skip_workflows — drop those entries entirely so the generator
-    # doesn't manage them. The on-disk file (if any) is left untouched.
+    # doesn't manage them. The on-disk file (if any) is left untouched. Applied
+    # after the allowlist, so skip still subtracts from an explicit selection.
     skip = {f"{n}.yml" for n in config.ci.skip_workflows}
     skipped = sorted(set(rendered).intersection(skip))
     rendered = {k: v for k, v in rendered.items() if k not in skip}
 
     results = _classify(workflows_dir, rendered)
+    for filename in excluded:
+        logger.info("  %-22s not in ci.only_workflows", filename)
     for filename in skipped:
         logger.info("  %-22s skipped (ci.skip_workflows)", filename)
 

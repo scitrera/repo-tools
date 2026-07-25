@@ -348,6 +348,7 @@ All keys optional; sensible defaults applied for anything you omit.
 ci:
   test_branches: [main, develop]              # default: [main, develop]
   skip_workflows: []                          # workflow basenames (no .yml) to leave unmanaged
+  only_workflows: []                          # allowlist; empty = manage everything that renders
   bootstrap_method: uvx                       # uvx | pip; default: uvx
   repo_tools_source: scitrera-repo-tools      # any uv/pip source spec; default: PyPI name
   python:
@@ -407,6 +408,24 @@ ci:
 The on-disk file is never touched and no drift is reported for skipped
 entries — handy when one workflow needs bespoke logic but you still want
 the others auto-synced.
+
+**Managing only some workflows.** `ci.only_workflows` is the inverse: an
+allowlist naming the workflows the generator owns, leaving everything else
+alone.
+
+```yaml
+ci:
+  only_workflows: [proto-check]    # manage just this one; ignore the rest
+```
+
+Prefer this for incremental adoption. A repo taking on one generated workflow
+at a time would otherwise have to enumerate every workflow it *doesn't* want in
+`skip_workflows`, and revisit that list whenever a new generator is added.
+
+Empty (the default) means "manage everything that renders". A name that isn't a
+real workflow basename is an error, not an empty selection — a typo'd allowlist
+would otherwise silently manage nothing and look like success. The two lists
+compose: `only_workflows` selects, then `skip_workflows` subtracts.
 
 ### `docker:` block
 
