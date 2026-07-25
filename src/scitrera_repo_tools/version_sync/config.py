@@ -132,6 +132,16 @@ class CiGoConfig:
     # test_args and separately remembering to enable the upload is how a repo
     # ends up generating a coverage file that nothing collects.
     coverage: bool = False
+    # How publish-go handles the per-module tags Go requires for nested modules.
+    #   none   - do not generate publish-go.yml (default)
+    #   verify - fail the release when a module tag is missing or points elsewhere
+    #   push   - additionally create and push any missing tag (contents: write)
+    # Publishing a Go module is only tag existence — there is no artifact to
+    # upload — so "publishing" here means getting `<dir>/vX.Y.Z` onto the commit
+    # the release tag names. Opt-in by default: enabling it also turns on a
+    # module-path/directory consistency check that can legitimately fail a repo
+    # whose layout was never valid for `go get`.
+    module_tags: str = "none"
 
 
 @dataclass(frozen=True)
@@ -524,6 +534,7 @@ _CI_GO_KEYS = (
     "enable_govulncheck",
     "test_args",
     "coverage",
+    "module_tags",
 )
 _CI_DOCKER_KEYS = (
     "default_platforms",
@@ -536,6 +547,7 @@ _CI_DOCKER_KEYS = (
 _CI_PYTHON_LINT_CHOICES = {"ruff", "none"}
 _CI_NPM_LINT_CHOICES = {"tsc-noemit", "eslint", "none"}
 _CI_GO_LINT_CHOICES = {"golangci-lint", "none"}
+_CI_GO_MODULE_TAG_MODES = {"none", "verify", "push"}
 _DOCKER_TAG_STYLES = {"standard", "dev"}
 _DOCKER_BUILD_STRATEGIES = {"auto", "qemu", "native"}
 _DOCKER_TEST_PREREQ_CHOICES = {"python", "npm", "go"}
@@ -626,6 +638,14 @@ def _parse_ci_go(raw: Any) -> CiGoConfig:
         kwargs["test_args"] = str(block["test_args"])
     if "coverage" in block:
         kwargs["coverage"] = _expect_bool(block, "coverage", "ci.go", False)
+    if "module_tags" in block:
+        mode = str(block["module_tags"])
+        if mode not in _CI_GO_MODULE_TAG_MODES:
+            raise ConfigError(
+                f"ci.go.module_tags: expected one of "
+                f"{sorted(_CI_GO_MODULE_TAG_MODES)}, got '{mode}'"
+            )
+        kwargs["module_tags"] = mode
     return CiGoConfig(**kwargs)
 
 

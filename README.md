@@ -259,7 +259,7 @@ directory-split ./data 4 --exclude .git --exclude node_modules
 
 ## `generate-ci-gha`
 
-Generates GitHub Actions workflows from `versions.yaml`. Produces up to eight
+Generates GitHub Actions workflows from `versions.yaml`. Produces up to nine
 files in `.github/workflows/` depending on which languages, proto outputs and
 image descriptors are present:
 
@@ -270,6 +270,7 @@ image descriptors are present:
 | `test-python.yml` | push/PR to `test_branches` | Matrix test across Python versions, per project |
 | `test-npm.yml` | push/PR to `test_branches` | Per-TS-project install + type-check + `npm test` |
 | `test-go.yml` | push/PR to `test_branches` | `go vet` + race-test + optional golangci-lint / govulncheck per Go project |
+| `publish-go.yml` | tag `v*.*.*` push | Reconcile per-module Go tags for the release |
 | `publish-python.yml` | tag `v*.*.*` push | Per-project PyPI publish in dependency order |
 | `publish-npm.yml` | tag `v*.*.*` push | Per-project npm publish in dependency order |
 | `build-docker.yml` | tag `v*.*.*` push + dispatch | Cascaded multi-arch image builds with inline test prereqs |
@@ -286,6 +287,52 @@ run time in case a setup action resolves to something else.
 Because an unpinned compiler in CI defeats the purpose of the check, a `proto:`
 block missing a pin its enabled outputs require is a **generation error** rather
 than a silent default. Pin the tool, or add `proto-check` to `ci.skip_workflows`.
+
+### `publish-go.yml` and Go module tags
+
+Go has no publish step: a module version exists the moment `<dir>/vX.Y.Z` points
+at a commit. `publish-go.yml` therefore makes the root `v*.*.*` tag the single
+release signal — it gates on the Go tests, then reconciles the per-module tags
+that Go actually resolves against. Module directories are derived from the
+`gomod_require` rules already in `project_rules`, so there is nothing extra to
+declare.
+
+```yaml
+ci:
+  go:
+    module_tags: verify     # none (default) | verify | push
+```
+
+`verify` fails the release when a module tag is missing or points at a different
+commit than the release tag. `push` additionally creates and pushes the missing
+ones, and requests `contents: write`. Start on `verify`; move to `push` once a
+real release has proven the wiring.
+
+Enabling it also turns on a consistency check that runs at generation time:
+**a nested module's path must end with its own directory.** This is worth
+understanding, because violating it fails quietly rather than loudly. Go locates
+a nested module by directory, so a `server/go.mod` declaring
+`module github.com/acme/thing` can never be fetched as `github.com/acme/thing`
+(the proxy looks at the repo root) *nor* as `github.com/acme/thing/server` (the
+declared path disagrees). Worse, if the repo root has no `go.mod`, the proxy
+synthesizes a one-line module from it — so `go get github.com/acme/thing@v1.2.3`
+resolves and downloads a phantom module carrying none of the real dependencies.
+The check refuses to generate rather than emit a workflow that would bless that.
+
+Because the root tag drives everything, submodule tags like `api/v1.2.3` do not
+match the `v*.*.*` filters and trigger nothing — which is correct: they are the
+artifact, not the cause.
+
+### Reusing test workflows
+
+`test-python.yml`, `test-npm.yml` and `test-go.yml` are generated with a
+`workflow_call:` trigger, and the release workflows gate on them with
+`uses: ./.github/workflows/test-<lang>.yml` rather than restating the matrix.
+Generating both sides is what makes this safe — the filename and job id are known
+to match. When a test workflow is not managed for a repo (excluded by
+`only_workflows` or `skip_workflows`), the caller falls back to inlining a copy,
+since a `uses:` pointing at a file the generator does not produce would be a
+dangling reference.
 
 The publish workflows respect the DAG defined by
 `dependency_mappings.<lang>.dependencies` — every consumer's job declares
@@ -379,6 +426,7 @@ ci:
     enable_govulncheck: true                    # default: true
     test_args: "-race -count=1"
     coverage: false                             # add -coverprofile/-covermode + upload artifact
+    module_tags: none                           # none | verify | push (see publish-go below)
   docker:
     default_platforms: [linux/amd64, linux/arm64]
     platform_runners:                           # native runners; missing platforms fall back to QEMU

@@ -9,6 +9,7 @@ deterministic: sorted, alphabetical tie-breaks, fixed action versions.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Iterable, List, Optional
 
 from ..compile_protos.tools import resolve_ts_package_dir
@@ -243,6 +244,7 @@ on:
     branches: [ {branches_csv} ]
   pull_request:
     branches: [ {branches_csv} ]
+  workflow_call:
 
 concurrency:
   group: test-python-${{{{ github.ref }}}}
@@ -407,6 +409,7 @@ on:
     branches: [ {branches_csv} ]
   pull_request:
     branches: [ {branches_csv} ]
+  workflow_call:
 
 concurrency:
   group: test-go-${{{{ github.ref }}}}
@@ -437,6 +440,7 @@ on:
     branches: [ {branches_csv} ]
   pull_request:
     branches: [ {branches_csv} ]
+  workflow_call:
 
 concurrency:
   group: test-npm-${{{{ github.ref }}}}
@@ -556,6 +560,156 @@ def _python_github_release_job(publish_job_ids: List[str]) -> str:
         with:
           files: dist/*
           generate_release_notes: true
+"""
+
+
+def _go_module_path(go_mod: Path) -> Optional[str]:
+    """The `module` path declared in a go.mod, or None if unreadable."""
+    try:
+        for line in go_mod.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("module "):
+                return line[len("module "):].strip()
+    except OSError:
+        return None
+    return None
+
+
+def _go_modules(config: SyncConfig) -> List[tuple]:
+    """(project, dir, module_path) for every Go module, sorted by directory.
+
+    `dir` is POSIX-relative to the repo root; "." means the module sits at the
+    root and is released by the bare `vX.Y.Z` tag.
+    """
+    out: List[tuple] = []
+    for project, manifest in sorted(manifests_for_language(config, "go").items()):
+        rel = manifest.parent.relative_to(config.root)
+        as_posix = str(rel).replace("\\", "/") or "."
+        out.append((project, as_posix, _go_module_path(manifest)))
+    return sorted(out, key=lambda t: t[1])
+
+
+def _go_module_tag_problems(modules: List[tuple]) -> List[str]:
+    """Module-path/directory mismatches that make a module unreleasable.
+
+    Go locates a nested module by *directory*: a module in `sub/` is fetched as
+    `<repo-root-path>/sub` at tag `sub/vX.Y.Z`. A go.mod whose declared path does
+    not end in its own directory therefore cannot be fetched under either name —
+    and if it claims the repo-root path, the proxy will happily synthesize a
+    phantom root module from a tree that has no go.mod, which resolves but
+    carries none of the real dependencies.
+    """
+    problems: List[str] = []
+    for project, directory, module_path in modules:
+        if module_path is None:
+            problems.append(f"{project}: could not read the module path from {directory}/go.mod")
+            continue
+        if directory == ".":
+            continue
+        if not module_path.endswith("/" + directory):
+            problems.append(
+                f"{project}: {directory}/go.mod declares module '{module_path}', but a module "
+                f"in '{directory}/' is released as tag '{directory}/vX.Y.Z' and its path must "
+                f"end with '/{directory}'. Either rename the module path or move go.mod."
+            )
+    return problems
+
+
+def build_publish_go(config: SyncConfig, ci: CiConfig) -> str:
+    """Reconcile per-module Go tags for a release.
+
+    Go has no publish step: a version exists once `<dir>/vX.Y.Z` points at a
+    commit. So this workflow gates on the tests and then makes those tags true,
+    driven by the single root tag the release already uses.
+    """
+    go = ci.go
+    if go.module_tags == "none":
+        return ""
+    modules = _go_modules(config)
+    nested = [m for m in modules if m[1] != "."]
+    if not nested:
+        return ""
+
+    problems = _go_module_tag_problems(modules)
+    if problems:
+        raise ValueError(
+            "publish-go.yml cannot be generated:\n  - " + "\n  - ".join(problems)
+            + "\nFix the module paths, set ci.go.module_tags: none, or add 'publish-go' "
+              "to ci.skip_workflows."
+        )
+
+    push = go.module_tags == "push"
+    dirs_csv = " ".join(d for _, d, _ in nested)
+    perms = "write" if push else "read"
+
+    if push:
+        action_block = """            if [ -z "$have" ]; then
+              echo "::notice::creating $tag at $sha"
+              git tag "$tag" "$sha"
+              new="$new $tag"
+            elif [ "$have" != "$sha" ]; then
+              echo "::error::$tag exists at $have but the release tag is $sha"
+              bad=1
+            else
+              echo "$tag already correct"
+            fi
+          done
+          if [ -n "$new" ]; then
+            git push origin $new
+          fi
+          [ "$bad" = 0 ]"""
+    else:
+        action_block = """            if [ -z "$have" ]; then
+              echo "::error::missing tag $tag — Go cannot resolve this module at $VERSION"
+              bad=1
+            elif [ "$have" != "$sha" ]; then
+              echo "::error::$tag points at $have but the release tag is $sha"
+              bad=1
+            else
+              echo "$tag ok"
+            fi
+          done
+          [ "$bad" = 0 ]"""
+
+    needs_clause, test_job = _reusable_test_jobs(config, ci, "go")
+
+    return f"""{GENERATED_HEADER}
+name: Publish (Go)
+
+on:
+  push:
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+{test_job}  module-tags:
+    name: {"Publish" if push else "Verify"} Go module tags
+    runs-on: ubuntu-latest
+{needs_clause}    permissions:
+      contents: {perms}
+    steps:
+      - uses: {CHECKOUT}
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: {"Reconcile" if push else "Verify"} per-module tags
+        env:
+          MODULE_DIRS: "{dirs_csv}"
+        run: |
+          set -euo pipefail
+          VERSION="${{{{ github.ref_name }}}}"
+          case "$VERSION" in v*) ;; *) echo "::error::expected a v-prefixed tag"; exit 1 ;; esac
+          sha="$(git rev-list -n1 "$VERSION")"
+          bad=0
+          new=""
+          for dir in $MODULE_DIRS; do
+            tag="$dir/$VERSION"
+            have="$(git rev-list -n1 "$tag" 2>/dev/null || true)"
+{action_block}
 """
 
 
@@ -1067,11 +1221,51 @@ def _native_merge_job(
 """
 
 
-def _inline_test_jobs(config: SyncConfig, ci: CiConfig) -> tuple:
+_LANG_TEST_WORKFLOW = {"python": "test-python", "npm": "test-npm", "go": "test-go"}
+
+
+def _workflow_is_managed(ci: CiConfig, basename: str) -> bool:
+    """Whether the generator will actually emit `<basename>.yml` for this repo."""
+    if ci.only_workflows and basename not in ci.only_workflows:
+        return False
+    return basename not in ci.skip_workflows
+
+
+def _lang_projects(config: SyncConfig, lang: str) -> List[str]:
+    if lang == "python":
+        return _python_projects(config)
+    if lang == "npm":
+        return _npm_projects(config)
+    return _go_projects(config)
+
+
+def _reusable_test_jobs(config: SyncConfig, ci: CiConfig, lang: str) -> tuple:
+    """(needs_clause, job_yaml) for gating a release job on `lang`'s tests.
+
+    Prefers `uses:` against the generated test workflow so the matrix is defined
+    exactly once — we generate both sides, so the filename and job id are known
+    to be correct. Falls back to inlining a copy when that workflow is not
+    managed for this repo, because a `uses:` pointing at a file the generator
+    does not produce is a dangling reference that fails at run time.
+    """
+    projects = _lang_projects(config, lang)
+    if not projects:
+        return "", ""
+    basename = _LANG_TEST_WORKFLOW[lang]
+    if _workflow_is_managed(ci, basename):
+        return "    needs: [ tests ]\n", (
+            f"  tests:\n    uses: ./.github/workflows/{basename}.yml\n\n"
+        )
+    inline, ids = _inline_test_jobs(config, ci, prereqs=(lang,))
+    needs = "    needs: [ " + ", ".join(ids) + " ]\n"
+    return needs, inline + "\n"
+
+
+def _inline_test_jobs(config: SyncConfig, ci: CiConfig, prereqs=None) -> tuple:
     """Return (concatenated job YAML, list of job ids) for inlined test prereqs."""
     parts: List[str] = []
     ids: List[str] = []
-    test_prereqs = set(ci.docker.test_prereqs)
+    test_prereqs = set(ci.docker.test_prereqs if prereqs is None else prereqs)
 
     if "python" in test_prereqs:
         ruff_spec = _ruff_spec(config)
@@ -1354,6 +1548,7 @@ WORKFLOW_GENERATORS = (
     ("test-python.yml", build_test_python),
     ("test-npm.yml", build_test_npm),
     ("test-go.yml", build_test_go),
+    ("publish-go.yml", build_publish_go),
     ("publish-python.yml", build_publish_python),
     ("publish-npm.yml", build_publish_npm),
     ("build-docker.yml", build_build_docker),
@@ -1377,6 +1572,7 @@ __all__ = [
     "build_test_python",
     "build_test_npm",
     "build_test_go",
+    "build_publish_go",
     "build_publish_python",
     "build_publish_npm",
     "build_build_docker",
