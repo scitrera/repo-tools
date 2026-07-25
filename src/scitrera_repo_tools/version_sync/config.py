@@ -127,6 +127,11 @@ class CiGoConfig:
     golangci_version: str = "v2.11.4"
     enable_govulncheck: bool = True
     test_args: str = "-race -count=1"
+    # Append coverage flags to `go test` and upload the profile as an artifact.
+    # One switch rather than two, because hand-writing `-coverprofile` into
+    # test_args and separately remembering to enable the upload is how a repo
+    # ends up generating a coverage file that nothing collects.
+    coverage: bool = False
 
 
 @dataclass(frozen=True)
@@ -191,6 +196,11 @@ class DockerImage:
     name: str
     context: str
     dockerfile: str
+    # Pushed repository name, when it must differ from the descriptor key.
+    # Two descriptors can target one repository distinguished only by tag —
+    # e.g. a `dev`-tagged variant published as `myimg:dev-*` alongside
+    # `myimg:*` — which is impossible if the key doubles as the image name.
+    image_name: Optional[str] = None
     tag_style: str = "standard"              # "standard" | "dev"
     platforms: Optional[tuple] = None        # default: ci.docker.default_platforms
     needs: Optional[str] = None
@@ -507,7 +517,14 @@ _CI_PYTHON_KEYS = (
     "verify_tag_version",
 )
 _CI_NPM_KEYS = ("node_version", "lint", "npm_environment", "use_provenance", "use_oidc")
-_CI_GO_KEYS = ("go_version", "lint", "golangci_version", "enable_govulncheck", "test_args")
+_CI_GO_KEYS = (
+    "go_version",
+    "lint",
+    "golangci_version",
+    "enable_govulncheck",
+    "test_args",
+    "coverage",
+)
 _CI_DOCKER_KEYS = (
     "default_platforms",
     "platform_runners",
@@ -548,7 +565,7 @@ def _parse_ci_python(raw: Any, project_versions: Mapping[str, str]) -> CiPythonC
     if "pypi_environment" in block:
         kwargs["pypi_environment"] = str(block["pypi_environment"])
     if "publish_requires_tests" in block:
-        kwargs["publish_requires_tests"] = bool(block["publish_requires_tests"])
+        kwargs["publish_requires_tests"] = _expect_bool(block, "publish_requires_tests", "ci.python", False)
     if "verify_tag_version" in block and block["verify_tag_version"] is not None:
         project = str(block["verify_tag_version"])
         if project not in project_versions:
@@ -579,9 +596,9 @@ def _parse_ci_npm(raw: Any) -> CiNpmConfig:
     if "npm_environment" in block:
         kwargs["npm_environment"] = str(block["npm_environment"])
     if "use_provenance" in block:
-        kwargs["use_provenance"] = bool(block["use_provenance"])
+        kwargs["use_provenance"] = _expect_bool(block, "use_provenance", "ci.npm", False)
     if "use_oidc" in block:
-        kwargs["use_oidc"] = bool(block["use_oidc"])
+        kwargs["use_oidc"] = _expect_bool(block, "use_oidc", "ci.npm", False)
     return CiNpmConfig(**kwargs)
 
 
@@ -604,9 +621,11 @@ def _parse_ci_go(raw: Any) -> CiGoConfig:
     if "golangci_version" in block:
         kwargs["golangci_version"] = str(block["golangci_version"])
     if "enable_govulncheck" in block:
-        kwargs["enable_govulncheck"] = bool(block["enable_govulncheck"])
+        kwargs["enable_govulncheck"] = _expect_bool(block, "enable_govulncheck", "ci.go", False)
     if "test_args" in block:
         kwargs["test_args"] = str(block["test_args"])
+    if "coverage" in block:
+        kwargs["coverage"] = _expect_bool(block, "coverage", "ci.go", False)
     return CiGoConfig(**kwargs)
 
 
@@ -629,10 +648,10 @@ def _parse_ci_docker(raw: Any) -> CiDockerConfig:
         merged.update({str(k): str(v) for k, v in runners.items()})
         kwargs["platform_runners"] = merged
     if "build_on_pr" in block:
-        kwargs["build_on_pr"] = bool(block["build_on_pr"])
+        kwargs["build_on_pr"] = _expect_bool(block, "build_on_pr", "ci.docker", False)
     if "enable_workflow_dispatch_version" in block:
-        kwargs["enable_workflow_dispatch_version"] = bool(
-            block["enable_workflow_dispatch_version"]
+        kwargs["enable_workflow_dispatch_version"] = _expect_bool(
+            block, "enable_workflow_dispatch_version", "ci.docker", True
         )
     if "test_prereqs" in block:
         prereqs = block["test_prereqs"]
@@ -686,7 +705,7 @@ def _parse_ci(raw: Any, project_versions: Mapping[str, str]) -> CiConfig:
             )
         kwargs["skip_workflows"] = tuple(str(s) for s in skip)
     if "github_release" in block:
-        kwargs["github_release"] = bool(block["github_release"])
+        kwargs["github_release"] = _expect_bool(block, "github_release", "ci", False)
     if "only_workflows" in block:
         only = block["only_workflows"]
         if not isinstance(only, list):
@@ -716,6 +735,13 @@ def _parse_docker_image(name: str, raw: Any) -> DockerImage:
         "context": block["context"],
         "dockerfile": block["dockerfile"],
     }
+    if "image_name" in block and block["image_name"] is not None:
+        img_name = block["image_name"]
+        if not isinstance(img_name, str) or not img_name.strip():
+            raise ConfigError(
+                f"docker.images.{name}.image_name: expected non-empty string"
+            )
+        kwargs["image_name"] = img_name.strip()
     if "tag_style" in block:
         ts = str(block["tag_style"])
         if ts not in _DOCKER_TAG_STYLES:
@@ -850,7 +876,13 @@ def _parse_proto_toolchain(raw: Any, preferred: PreferredVersions) -> ProtoToolc
     return ProtoToolchainConfig(**kwargs)
 
 
-def _proto_bool(block: Mapping[str, Any], key: str, where: str, default: bool) -> bool:
+def _expect_bool(block: Mapping[str, Any], key: str, where: str, default: bool) -> bool:
+    """Read a strictly-boolean key.
+
+    `bool(value)` would coerce anything truthy, which is actively dangerous for
+    a flag: quoted `coverage: "no"` is the string "no", and `bool("no")` is
+    True — silently the opposite of what the author wrote.
+    """
     if key not in block:
         return default
     val = block[key]
@@ -884,8 +916,8 @@ def _parse_proto_outputs(raw: Any) -> Dict[str, Any]:
         out["go"] = ProtoGoOutput(
             path=_proto_out_path(go_block, "proto.outputs.go"),
             paths=paths_mode,
-            grpc=_proto_bool(go_block, "grpc", "proto.outputs.go", True),
-            gofmt=_proto_bool(go_block, "gofmt", "proto.outputs.go", True),
+            grpc=_expect_bool(go_block, "grpc", "proto.outputs.go", True),
+            gofmt=_expect_bool(go_block, "gofmt", "proto.outputs.go", True),
         )
 
     if "python" in block:
@@ -893,12 +925,12 @@ def _parse_proto_outputs(raw: Any) -> Dict[str, Any]:
         _reject_unknown(py_block, _PROTO_OUTPUT_KEYS["python"], "proto.outputs.python")
         out["python"] = ProtoPythonOutput(
             path=_proto_out_path(py_block, "proto.outputs.python"),
-            stubs=_proto_bool(py_block, "stubs", "proto.outputs.python", True),
-            grpc=_proto_bool(py_block, "grpc", "proto.outputs.python", True),
-            fix_relative_imports=_proto_bool(
+            stubs=_expect_bool(py_block, "stubs", "proto.outputs.python", True),
+            grpc=_expect_bool(py_block, "grpc", "proto.outputs.python", True),
+            fix_relative_imports=_expect_bool(
                 py_block, "fix_relative_imports", "proto.outputs.python", True
             ),
-            ensure_init_py=_proto_bool(
+            ensure_init_py=_expect_bool(
                 py_block, "ensure_init_py", "proto.outputs.python", True
             ),
         )

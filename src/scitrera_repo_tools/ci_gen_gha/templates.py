@@ -295,6 +295,23 @@ def _npm_test_job(project: str, project_dir: str, ci: CiConfig) -> str:
 
 def _go_test_job(project: str, project_dir: str, go_version: str, ci: CiConfig) -> str:
     go = ci.go
+    test_args = go.test_args
+    coverage_step = ""
+    if go.coverage:
+        test_args = f"{test_args} -coverprofile=coverage.out -covermode=atomic"
+        # `if: always()` so a failing run still yields the profile for whatever
+        # did execute; `warn` rather than `error` because a package set with no
+        # coverable statements legitimately produces no file.
+        coverage_step = f"""
+      - name: Upload coverage artifact
+        if: always()
+        uses: {UPLOAD_ARTIFACT}
+        with:
+          name: go-coverage-{project}
+          path: {project_dir}/coverage.out
+          if-no-files-found: warn
+          retention-days: 14
+"""
     return f"""  test-{project}:
     name: Test {project}
     runs-on: ubuntu-latest
@@ -311,9 +328,9 @@ def _go_test_job(project: str, project_dir: str, go_version: str, ci: CiConfig) 
         working-directory: {project_dir}
 
       - name: go test
-        run: go test {go.test_args} ./...
+        run: go test {test_args} ./...
         working-directory: {project_dir}
-"""
+{coverage_step}"""
 
 
 def _go_lint_job(project: str, project_dir: str, ci: CiConfig) -> str:
@@ -705,6 +722,16 @@ def _platform_slug(platform: str) -> str:
     return platform.replace("/", "-")
 
 
+def _image_ref_name(img) -> str:
+    """Repository name this image is pushed under.
+
+    Distinct from `img.name`, which is the descriptor key and is used for job
+    ids: two descriptors may publish to the same repository under different tag
+    styles, so the pushed name has to be overridable independently.
+    """
+    return img.image_name or img.name
+
+
 def _docker_image_refs(docker_cfg, image_name: str) -> List[str]:
     """All registry refs the image gets pushed to (one per configured registry)."""
     refs: List[str] = []
@@ -869,7 +896,7 @@ def _docker_build_args(
     """Cascade BASE_IMAGE build-arg block, or empty when no parent."""
     if parent_node is None:
         return ""
-    parent_primary = _docker_primary_ref(docker_cfg, parent_node.name)
+    parent_primary = _docker_primary_ref(docker_cfg, _image_ref_name(parent_node.image))
     parent_job = _docker_parent_job_id(parent_node)
     return f"""{indent}    build-args: |
 {indent}      {node.image.base_image_arg}={parent_primary}:${{{{ needs.{parent_job}.outputs.base-tag }}}}
@@ -902,7 +929,9 @@ def _qemu_build_job(
         if ci.docker.enable_workflow_dispatch_version
         else ""
     )
-    meta_step = _docker_meta_step(img.name, docker_cfg, img.tag_style, img.version_from)
+    meta_step = _docker_meta_step(
+        _image_ref_name(img), docker_cfg, img.tag_style, img.version_from
+    )
     build_args = _docker_build_args(node, parent_node, docker_cfg)
 
     return f"""  build-{img.name}:
@@ -946,7 +975,7 @@ def _native_per_platform_job(
     """One per-platform native job that pushes by digest."""
     img = node.image
     slug = _platform_slug(platform)
-    primary = _docker_primary_ref(docker_cfg, img.name)
+    primary = _docker_primary_ref(docker_cfg, _image_ref_name(img))
     needs_parts = []
     if test_needs_csv:
         needs_parts.append(test_needs_csv)
@@ -993,7 +1022,7 @@ def _native_merge_job(
 ) -> str:
     """Combine per-platform digests into one multi-arch manifest."""
     img = node.image
-    primary = _docker_primary_ref(docker_cfg, img.name)
+    primary = _docker_primary_ref(docker_cfg, _image_ref_name(img))
     per_plat_jobs = [f"build-{img.name}-{_platform_slug(p)}" for p in platforms]
     needs_csv = ", ".join(per_plat_jobs)
 
@@ -1009,7 +1038,9 @@ def _native_merge_job(
         if ci.docker.enable_workflow_dispatch_version
         else ""
     )
-    meta_step = _docker_meta_step(img.name, docker_cfg, img.tag_style, img.version_from)
+    meta_step = _docker_meta_step(
+        _image_ref_name(img), docker_cfg, img.tag_style, img.version_from
+    )
 
     return f"""  merge-{img.name}:
     name: Merge {img.name} multi-arch manifest

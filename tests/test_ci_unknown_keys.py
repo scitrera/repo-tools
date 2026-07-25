@@ -77,6 +77,30 @@ def test_every_documented_key_is_accepted(tmp_path, write_file):
     assert cfg.ci.docker.build_on_pr is True
 
 
+@pytest.mark.parametrize("ci_body,where,key", [
+    ('  github_release: "no"\n', "ci", "github_release"),
+    ('  python:\n    publish_requires_tests: "yes"\n', "ci.python", "publish_requires_tests"),
+    ('  npm:\n    use_provenance: 1\n', "ci.npm", "use_provenance"),
+    ('  npm:\n    use_oidc: "true"\n', "ci.npm", "use_oidc"),
+    ('  go:\n    enable_govulncheck: "off"\n', "ci.go", "enable_govulncheck"),
+    ('  go:\n    coverage: "no"\n', "ci.go", "coverage"),
+    ('  docker:\n    build_on_pr: "false"\n', "ci.docker", "build_on_pr"),
+    ('  docker:\n    enable_workflow_dispatch_version: 0\n',
+     "ci.docker", "enable_workflow_dispatch_version"),
+])
+def test_boolean_flags_reject_non_booleans(tmp_path, write_file, ci_body, where, key):
+    """`bool("no")` is True — a truthy coercion silently inverts the author's intent."""
+    with pytest.raises(ConfigError) as exc:
+        _load(tmp_path, write_file, ci_body)
+    assert f"{where}.{key}: expected boolean" in str(exc.value)
+
+
+def test_real_booleans_still_accepted(tmp_path, write_file):
+    cfg = _load(tmp_path, write_file, "  github_release: false\n  go:\n    coverage: true\n")
+    assert cfg.ci.github_release is False
+    assert cfg.ci.go.coverage is True
+
+
 def test_github_release_moved_off_ci_python(tmp_path, write_file):
     """It moved to `ci:` level; the old spot must fail rather than be ignored.
 

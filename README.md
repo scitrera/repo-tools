@@ -378,6 +378,7 @@ ci:
     golangci_version: "v2.11.4"
     enable_govulncheck: true                    # default: true
     test_args: "-race -count=1"
+    coverage: false                             # add -coverprofile/-covermode + upload artifact
   docker:
     default_platforms: [linux/amd64, linux/arm64]
     platform_runners:                           # native runners; missing platforms fall back to QEMU
@@ -459,10 +460,18 @@ docker:
       context: server
       dockerfile: server/Dockerfile.aetherlite-dev
       needs: aetherlite
+      image_name: aetherlite                   # push to `aetherlite`, not `aetherlite-dev`
       tag_style: dev                           # dev- prefixed tags; suppresses :latest
       version_from: aether-gateway
       # base_image_arg: BASE_IMAGE             # override the build-arg name (default: BASE_IMAGE)
 ```
+
+**Image naming.** By default the descriptor key *is* the pushed repository name.
+`image_name` decouples them, which is required when two descriptors publish to
+one repository distinguished only by tag — above, `aetherlite:*` and
+`aetherlite:dev-*` are built by separate jobs from the same Dockerfile. Job ids
+stay keyed on the descriptor (`build-aetherlite-dev`), so they never collide, and
+a child's `BASE_IMAGE` follows the parent's overridden name.
 
 **Cascade semantics.** When image B `needs: A`, B's build job depends on
 A's build (or merge) job, and `BASE_IMAGE=<primary-registry>/A:<A's base-tag>`
