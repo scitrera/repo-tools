@@ -11,8 +11,23 @@ preferred_versions:
   python:
     "PyYAML": "6.0.3"
     "pytest": "9.0.3"
+    # Consumed by `generate-ci-gha` for the lint step. An unpinned linter turns
+    # an upstream release into a red build on an unrelated PR.
+    "ruff": "0.16.0"
 
 project_rules:
   scitrera-repo-tools:
     - { type: pyproject, path: pyproject.toml }
     - { type: init_py,   path: src/scitrera_repo_tools/__init__.py }
+
+# This repo's own GitHub Actions workflows are generated from this block.
+# Regenerate with `python scripts/generate-ci-gha.py --force`.
+ci:
+  test_branches: [ main ]
+  # Resolve repo-tools from the checked-out tree rather than PyPI, so these
+  # workflows exercise the code in the commit under test instead of whatever
+  # the last release happened to contain.
+  repo_tools_source: "."
+  python:
+    verify_tag_version: scitrera-repo-tools
+    github_release: true
