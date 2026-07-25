@@ -118,6 +118,11 @@ def _job_id(prefix: str, project: str) -> str:
     return f"{prefix}-{project}"
 
 
+def _push_branches(ci: CiConfig) -> tuple:
+    """Branches whose pushes trigger CI; defaults to the PR target branches."""
+    return ci.push_branches or ci.test_branches
+
+
 def _format_branch_list(branches: Iterable[str]) -> str:
     quoted = ", ".join(b for b in branches)
     return f"[ {quoted} ]"
@@ -230,6 +235,7 @@ def build_test_python(config: SyncConfig, ci: CiConfig) -> str:
         return ""
 
     branches_csv = ", ".join(ci.test_branches)
+    push_csv = ", ".join(_push_branches(ci))
     ruff_spec = _ruff_spec(config)
     jobs = "\n".join(
         _python_test_job(p, _project_dir(config, "python", p), ci, ruff_spec)
@@ -241,7 +247,7 @@ name: Test (Python)
 
 on:
   push:
-    branches: [ {branches_csv} ]
+    branches: [ {push_csv} ]
   pull_request:
     branches: [ {branches_csv} ]
   workflow_call:
@@ -462,6 +468,7 @@ def build_test_go(config: SyncConfig, ci: CiConfig) -> str:
 
     go_version = _go_version(config)
     branches_csv = ", ".join(ci.test_branches)
+    push_csv = ", ".join(_push_branches(ci))
 
     jobs: List[str] = []
     for p in projects:
@@ -479,7 +486,7 @@ name: Test (Go)
 
 on:
   push:
-    branches: [ {branches_csv} ]
+    branches: [ {push_csv} ]
   pull_request:
     branches: [ {branches_csv} ]
   workflow_call:
@@ -506,6 +513,7 @@ def build_test_npm(config: SyncConfig, ci: CiConfig) -> str:
         return ""
 
     branches_csv = ", ".join(ci.test_branches)
+    push_csv = ", ".join(_push_branches(ci))
     jobs = "\n".join(
         _npm_test_job(p, _project_dir(config, "typescript", p), ci) for p in projects
     )
@@ -515,7 +523,7 @@ name: Test (npm)
 
 on:
   push:
-    branches: [ {branches_csv} ]
+    branches: [ {push_csv} ]
   pull_request:
     branches: [ {branches_csv} ]
   workflow_call:

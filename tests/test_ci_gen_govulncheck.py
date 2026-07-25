@@ -203,3 +203,40 @@ def test_empty_projects_list_rejected(tmp_path, write_file):
     body = SCOPED.replace("projects: [sdk]", "projects: []")
     with pytest.raises(ConfigError, match="non-empty list"):
         _multi(tmp_path, write_file, body)
+
+
+# ── push vs pull_request duplication ──────────────────────────────────────────
+
+def _triggers(doc: dict) -> dict:
+    return doc[True]
+
+
+def test_push_branches_defaults_to_test_branches(tmp_path, write_file):
+    """Back-compat: omitting push_branches keeps the previous trigger pair."""
+    doc = _doc(tmp_path, write_file, "    lint: none\n")
+    on = _triggers(doc)
+    assert on["push"]["branches"] == on["pull_request"]["branches"] == ["main", "develop"]
+
+
+def test_push_branches_narrows_only_the_push_trigger(tmp_path, write_file):
+    """The fix for duplicate runs: a PR head branch must not also fire `push`.
+
+    A cancelled run reports as cancelled, never success, and a cancelled
+    required check can hold up a merge — so the duplicate has to not exist
+    rather than be cancelled after the fact.
+    """
+    write_file(tmp_path / "go.mod", "module example.com/app\n\ngo 1.25\n")
+    write_file(tmp_path / "versions.yaml", BODY.format(
+        go_body="    lint: none\n").replace("ci:\n", "ci:\n  push_branches: [main]\n"))
+    cfg = load_config(tmp_path / "versions.yaml")
+    on = _triggers(yaml.safe_load(build_test_go(cfg, cfg.ci)))
+    assert on["push"]["branches"] == ["main"]
+    assert on["pull_request"]["branches"] == ["main", "develop"]
+
+
+def test_empty_push_branches_rejected(tmp_path, write_file):
+    write_file(tmp_path / "go.mod", "module example.com/app\n\ngo 1.25\n")
+    write_file(tmp_path / "versions.yaml", BODY.format(
+        go_body="    lint: none\n").replace("ci:\n", "ci:\n  push_branches: []\n"))
+    with pytest.raises(ConfigError, match="push_branches"):
+        load_config(tmp_path / "versions.yaml")

@@ -192,6 +192,15 @@ class CiDockerConfig:
 class CiConfig:
     """Optional `ci:` block driving the `generate-ci-gha` subcommand."""
     test_branches: tuple = ("main", "develop")
+    # Branches whose *pushes* trigger the test workflows. Empty means "same as
+    # test_branches". Narrowing this is the only way to avoid running every
+    # check twice for one commit: a branch that is both in the push list and the
+    # head of an open PR fires `push` and `pull_request` together, and the
+    # redundant run can only ever be cancelled — GitHub reports it as cancelled,
+    # never as success, and a cancelled required check can hold up a merge.
+    # Setting this to just the default branch keeps post-merge validation while
+    # leaving pre-merge validation to the PR event.
+    push_branches: tuple = ()
     # How generated workflows provision scitrera-repo-tools before invoking
     # `sync-versions`. `uvx` mirrors what the `scripts/` shims do locally
     # (resolve on demand, no persistent install) so CI and developer machines
@@ -538,6 +547,7 @@ def _parse_go_toolchain(raw: Any) -> GoToolchainConfig:
 _CI_BOOTSTRAP_METHODS = {"uvx", "pip"}
 _CI_KEYS = (
     "test_branches",
+    "push_branches",
     "bootstrap_method",
     "repo_tools_source",
     "skip_workflows",
@@ -792,6 +802,11 @@ def _parse_ci(raw: Any, project_versions: Mapping[str, str]) -> CiConfig:
         if not isinstance(branches, list) or not branches:
             raise ConfigError("ci.test_branches: expected non-empty list of branch names")
         kwargs["test_branches"] = tuple(str(b) for b in branches)
+    if "push_branches" in block:
+        pb = block["push_branches"]
+        if not isinstance(pb, list) or not pb:
+            raise ConfigError("ci.push_branches: expected non-empty list of branch names")
+        kwargs["push_branches"] = tuple(str(b) for b in pb)
     if "skip_workflows" in block:
         skip = block["skip_workflows"]
         if not isinstance(skip, list):

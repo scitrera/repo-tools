@@ -366,9 +366,32 @@ Two further behaviours worth knowing:
 
 The test workflows trigger on both events, so pushing to a branch that already
 has an open PR fires twice — most visibly for a `develop` -> `main` PR, where
-`develop` is in both trigger lists. `github.ref` differs between the two events
-(`refs/heads/X` vs `refs/pull/N/merge`), so a concurrency group keyed on it will
-not collapse them. The generated workflows key on the branch instead:
+`develop` is in both trigger lists.
+
+`push_branches` is the real fix: set it to just the default branch so a PR head
+branch never fires `push` at all.
+
+```yaml
+ci:
+  test_branches: [main, develop]   # PRs targeting these run checks
+  push_branches: [main]            # only pushes to main run checks
+```
+
+Post-merge validation on the default branch is preserved and pre-merge
+validation comes from the PR event, so nothing is unchecked *while a PR is
+open*. The trade-off is real though: a push to `develop` with no open PR then
+runs nothing.
+
+Cancelling is not an adequate substitute. A cancelled run reports as cancelled,
+never as success — GitHub will say "N successful, M cancelled" rather than
+all-green, and a cancelled *required* check can hold up a merge. The duplicate
+has to not exist rather than be killed after it starts.
+
+Concurrency grouping still helps for the ordinary case of pushing twice to the
+same PR in quick succession, where the superseded run *should* be cancelled.
+`github.ref` differs between the two events (`refs/heads/X` vs
+`refs/pull/N/merge`), so a group keyed on it cannot collapse them; the generated
+workflows key on the branch instead:
 
 ```yaml
 concurrency:
@@ -458,7 +481,8 @@ config depends on a recently added key.
 
 ```yaml
 ci:
-  test_branches: [main, develop]              # default: [main, develop]
+  test_branches: [main, develop]              # PR target branches; default: [main, develop]
+  push_branches: [main]                       # branches whose pushes trigger CI; default: test_branches
   skip_workflows: []                          # workflow basenames (no .yml) to leave unmanaged
   only_workflows: []                          # allowlist; empty = manage everything that renders
   github_release: false                       # attach built dists to a GitHub release for the tag
