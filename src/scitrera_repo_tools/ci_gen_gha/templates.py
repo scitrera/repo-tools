@@ -31,7 +31,7 @@ DOCKER_BUILD_PUSH = "docker/build-push-action@v6"
 UPLOAD_ARTIFACT = "actions/upload-artifact@v7"
 DOWNLOAD_ARTIFACT = "actions/download-artifact@v8"
 GH_RELEASE = "softprops/action-gh-release@v3"
-SETUP_UV = "astral-sh/setup-uv@v9"
+SETUP_UV = "astral-sh/setup-uv@v9.0.0"
 
 # Python used for jobs that need an interpreter of their own (building sdists,
 # reading tomllib). Unrelated to the test matrix.
