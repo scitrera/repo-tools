@@ -124,6 +124,23 @@ class CiNpmConfig:
 
 
 @dataclass(frozen=True)
+class GovulncheckIgnore:
+    """One accepted-risk advisory.
+
+    `projects` scopes the waiver to specific Go modules. Empty means every
+    module, which is right for a repo-wide dependency but wrong when only one
+    module reaches the vulnerable code — the others would then report the entry
+    as stale on every run, which trains people to ignore that warning.
+    """
+    id: str
+    reason: str
+    projects: tuple = ()
+
+    def applies_to(self, project: str) -> bool:
+        return not self.projects or project in self.projects
+
+
+@dataclass(frozen=True)
 class CiGoConfig:
     """Per-language CI knobs for go flows."""
     go_version: Optional[str] = None        # default: derive from go_toolchain.go, else "1.25"
@@ -675,7 +692,7 @@ def _parse_ci_go(raw: Any) -> CiGoConfig:
         entries = []
         for item in raw_ignore:
             entry = _expect_mapping(item, "ci.go.govulncheck_ignore[]")
-            _reject_unknown(entry, ("id", "reason"), "ci.go.govulncheck_ignore[]")
+            _reject_unknown(entry, ("id", "reason", "projects"), "ci.go.govulncheck_ignore[]")
             vid = str(entry.get("id", "")).strip()
             reason = str(entry.get("reason", "")).strip()
             if not vid:
@@ -685,7 +702,16 @@ def _parse_ci_go(raw: Any) -> CiGoConfig:
                     f"ci.go.govulncheck_ignore[{vid}].reason: required — an "
                     "allow-listed advisory must record why it is accepted"
                 )
-            entries.append((vid, reason))
+            raw_projects = entry.get("projects")
+            projects: tuple = ()
+            if raw_projects is not None:
+                if not isinstance(raw_projects, list) or not raw_projects:
+                    raise ConfigError(
+                        f"ci.go.govulncheck_ignore[{vid}].projects: expected a "
+                        "non-empty list of project names"
+                    )
+                projects = tuple(str(x) for x in raw_projects)
+            entries.append(GovulncheckIgnore(vid, reason, projects))
         kwargs["govulncheck_ignore"] = tuple(entries)
     if "module_tags" in block:
         mode = str(block["module_tags"])
@@ -1146,6 +1172,7 @@ __all__ = [
     "GoToolchainConfig",
     "CiPythonConfig",
     "CiNpmConfig",
+    "GovulncheckIgnore",
     "CiGoConfig",
     "CiDockerConfig",
     "CiConfig",

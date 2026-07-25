@@ -334,7 +334,14 @@ ci:
     govulncheck_ignore:
       - id: GO-2026-5668
         reason: "docker/docker; no upstream fix; tracked in SECURITY.md"
+        projects: [my-sdk]        # optional; omit to apply to every Go module
 ```
+
+Scope with `projects` when only some modules reach the vulnerable code. A
+repo-wide waiver would otherwise make every *other* module report the entry as
+stale on every run — training people to ignore the warning that keeps the list
+from rotting. Naming a project that does not exist is an error rather than a
+waiver that silently matches nothing.
 
 `reason` is required — an allow-list entry is a security decision and the
 workflow should record who accepted what. The reason is emitted as a comment

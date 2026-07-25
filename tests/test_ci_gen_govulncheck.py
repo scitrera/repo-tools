@@ -132,3 +132,74 @@ def test_concurrency_collapses_push_and_pr_runs(tmp_path, write_file):
     group = doc["concurrency"]["group"]
     assert group == "test-go-${{ github.head_ref || github.ref_name }}"
     assert doc["concurrency"]["cancel-in-progress"] is True
+
+
+# ── per-project scoping ───────────────────────────────────────────────────────
+
+MULTI = '''\
+app: 1.2.3
+go_toolchain:
+  go: "1.25.12"
+project_rules:
+  svc:
+    - {{ type: gomod_require, path: svc/go.mod }}
+  sdk:
+    - {{ type: gomod_require, path: sdk/go.mod }}
+ci:
+  go:
+    lint: none
+{go_body}
+'''
+
+
+def _multi(tmp_path: Path, write_file, go_body: str):
+    write_file(tmp_path / "svc/go.mod", "module example.com/r/svc\n\ngo 1.25\n")
+    write_file(tmp_path / "sdk/go.mod", "module example.com/r/sdk\n\ngo 1.25\n")
+    write_file(tmp_path / "versions.yaml", MULTI.format(go_body=go_body))
+    cfg = load_config(tmp_path / "versions.yaml")
+    return yaml.safe_load(build_test_go(cfg, cfg.ci))
+
+
+SCOPED = """\
+    govulncheck_ignore:
+      - id: GO-2026-5668
+        reason: "reachable only through the sdk's docker orchestrator"
+        projects: [sdk]
+"""
+
+
+def test_scoped_waiver_reaches_only_the_named_project(tmp_path, write_file):
+    """A repo-wide waiver would make every other module report it as stale."""
+    doc = _multi(tmp_path, write_file, SCOPED)
+    assert doc["jobs"]["security-sdk"]["steps"][-1]["env"]["IGNORED_ADVISORIES"] == "GO-2026-5668"
+    assert doc["jobs"]["security-svc"]["steps"][-1]["env"]["IGNORED_ADVISORIES"] == ""
+
+
+def test_unscoped_waiver_still_applies_everywhere(tmp_path, write_file):
+    """Omitting `projects` keeps the 0.1.16 behaviour for repo-wide deps."""
+    body = SCOPED.replace("        projects: [sdk]\n", "")
+    doc = _multi(tmp_path, write_file, body)
+    for job in ("security-sdk", "security-svc"):
+        assert doc["jobs"][job]["steps"][-1]["env"]["IGNORED_ADVISORIES"] == "GO-2026-5668"
+
+
+def test_reason_only_rendered_where_the_waiver_applies(tmp_path, write_file):
+    write_file(tmp_path / "svc/go.mod", "module example.com/r/svc\n\ngo 1.25\n")
+    write_file(tmp_path / "sdk/go.mod", "module example.com/r/sdk\n\ngo 1.25\n")
+    write_file(tmp_path / "versions.yaml", MULTI.format(go_body=SCOPED))
+    cfg = load_config(tmp_path / "versions.yaml")
+    text = build_test_go(cfg, cfg.ci)
+    assert text.count("# GO-2026-5668: reachable only through") == 1
+
+
+def test_unknown_project_in_scope_is_an_error(tmp_path, write_file):
+    """A typo would scope the waiver to nothing and fail with no explanation."""
+    body = SCOPED.replace("projects: [sdk]", "projects: [sdk-go]")
+    with pytest.raises(ValueError, match="unknown Go project"):
+        _multi(tmp_path, write_file, body)
+
+
+def test_empty_projects_list_rejected(tmp_path, write_file):
+    body = SCOPED.replace("projects: [sdk]", "projects: []")
+    with pytest.raises(ConfigError, match="non-empty list"):
+        _multi(tmp_path, write_file, body)

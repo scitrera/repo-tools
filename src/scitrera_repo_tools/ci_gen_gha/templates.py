@@ -377,9 +377,10 @@ def _go_security_job(project: str, project_dir: str, go_version: str, ci: CiConf
     for code that cannot execute.
     """
     go = ci.go
-    ignore_ids = " ".join(vid for vid, _ in go.govulncheck_ignore)
+    applicable = [e for e in go.govulncheck_ignore if e.applies_to(project)]
+    ignore_ids = " ".join(e.id for e in applicable)
     reasons = "".join(
-        f"          # {vid}: {reason}\n" for vid, reason in go.govulncheck_ignore
+        f"          # {e.id}: {e.reason}\n" for e in applicable
     )
     reason_block = f"\n{reasons}" if reasons else "\n"
     return f"""  security-{project}:
@@ -446,6 +447,18 @@ def build_test_go(config: SyncConfig, ci: CiConfig) -> str:
     projects = _go_projects(config)
     if not projects:
         return ""
+
+    # A misspelled project name would scope a waiver to nothing, so the
+    # advisory would keep failing the build with no indication why.
+    known = set(projects)
+    unknown = sorted(
+        {p for e in ci.go.govulncheck_ignore for p in e.projects} - known
+    )
+    if unknown:
+        raise ValueError(
+            f"ci.go.govulncheck_ignore names unknown Go project(s) {unknown}; "
+            f"expected one of {sorted(known)}"
+        )
 
     go_version = _go_version(config)
     branches_csv = ", ".join(ci.test_branches)
