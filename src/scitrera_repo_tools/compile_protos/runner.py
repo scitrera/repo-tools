@@ -251,7 +251,7 @@ def run(
 
     if not skip_verify:
         logger.info("Verifying proto toolchain against proto.toolchain pins...")
-        checks = verify_toolchain(config.root, proto, python_exe)
+        checks = verify_toolchain(config.root, proto, python_exe, languages=selected)
         errors = _report_toolchain(checks, verbose)
         if errors:
             logger.error(

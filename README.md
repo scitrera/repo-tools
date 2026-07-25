@@ -259,19 +259,33 @@ directory-split ./data 4 --exclude .git --exclude node_modules
 
 ## `generate-ci-gha`
 
-Generates GitHub Actions workflows from `versions.yaml`. Produces up to seven
-files in `.github/workflows/` depending on which languages and image
-descriptors are present:
+Generates GitHub Actions workflows from `versions.yaml`. Produces up to eight
+files in `.github/workflows/` depending on which languages, proto outputs and
+image descriptors are present:
 
 | File | Trigger | Purpose |
 |---|---|---|
 | `version-check.yml` | PR (paths-filtered) | Fail PRs that drift from `versions.yaml` |
+| `proto-check.yml` | PR (paths-filtered) | Fail PRs whose generated proto code is stale, one job per language |
 | `test-python.yml` | push/PR to `test_branches` | Matrix test across Python versions, per project |
 | `test-npm.yml` | push/PR to `test_branches` | Per-TS-project install + type-check + `npm test` |
 | `test-go.yml` | push/PR to `test_branches` | `go vet` + race-test + optional golangci-lint / govulncheck per Go project |
 | `publish-python.yml` | tag `v*.*.*` push | Per-project PyPI publish in dependency order |
 | `publish-npm.yml` | tag `v*.*.*` push | Per-project npm publish in dependency order |
 | `build-docker.yml` | tag `v*.*.*` push + dispatch | Cascaded multi-arch image builds with inline test prereqs |
+
+`proto-check.yml` is emitted only when a `proto:` block is present, and gets one
+job per configured output language (`--lang go` / `--lang python` /
+`--lang typescript`). The split is deliberate: each job provisions just its own
+toolchain — protoc plus the Go plugins, or grpcio-tools, or `npm ci` — so the
+three run in parallel rather than serializing one job through every ecosystem's
+installer. Every version comes from `proto.toolchain`, so the workflow and
+`compile-protos` cannot disagree, and `compile-protos --check` re-verifies at
+run time in case a setup action resolves to something else.
+
+Because an unpinned compiler in CI defeats the purpose of the check, a `proto:`
+block missing a pin its enabled outputs require is a **generation error** rather
+than a silent default. Pin the tool, or add `proto-check` to `ci.skip_workflows`.
 
 The publish workflows respect the DAG defined by
 `dependency_mappings.<lang>.dependencies` — every consumer's job declares

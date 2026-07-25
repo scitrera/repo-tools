@@ -13,6 +13,7 @@ confusing CI diff into a precise local error.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -23,6 +24,10 @@ from typing import List, Optional, Sequence
 from ..version_sync.config import ProtoConfig
 
 _PROBE_TIMEOUT = 30
+
+# A version token: optional `v`, then digits/dots, with an optional pre-release
+# or build suffix. Used to reject error text that merely looks like a word.
+_VERSION_TOKEN = re.compile(r"^v?\d+(\.\d+)*([-+.][0-9A-Za-z.+-]*)?$")
 
 
 class ToolState(str, Enum):
@@ -82,7 +87,10 @@ def _run(cmd: Sequence[str], cwd: Optional[Path] = None) -> Optional[str]:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if proc.returncode != 0 and not (proc.stdout or proc.stderr):
+    if proc.returncode != 0:
+        # A tool whose --version fails is not usable, and its error text must not
+        # be mistaken for output: `/usr/bin/env: 'node': No such file or directory`
+        # would otherwise parse as the version "directory".
         return None
     return (proc.stdout or "") + (proc.stderr or "")
 
@@ -101,8 +109,10 @@ def _parse_version_output(text: Optional[str]) -> Optional[str]:
         line = line.strip()
         if not line:
             continue
-        token = line.split()[-1]
-        return normalize_version(token)
+        token = normalize_version(line.split()[-1])
+        # Reject anything that isn't version-shaped rather than reporting a
+        # confident-looking bogus version; the caller treats None as "missing".
+        return token if token and _VERSION_TOKEN.match(token) else None
     return None
 
 
@@ -270,16 +280,26 @@ def check_proto_loader(expected: Optional[str], root: Path, proto: ProtoConfig) 
     return _compare("proto_loader", "proto-loader-gen-types", expected, found, hint)
 
 
-def verify_toolchain(root: Path, proto: ProtoConfig, python_exe: str) -> List[ToolCheck]:
-    """Probe every tool the enabled outputs require.
+def verify_toolchain(
+    root: Path,
+    proto: ProtoConfig,
+    python_exe: str,
+    languages: Optional[Sequence[str]] = None,
+) -> List[ToolCheck]:
+    """Probe the tools required by `languages` (default: every enabled output).
 
     Only tools actually needed are checked, so a Go-only repo is never asked to
-    have grpcio-tools installed.
+    have grpcio-tools installed. Honoring `languages` matters beyond that: it
+    lets a caller that restricted generation with `--lang` run in an environment
+    provisioned for only that language — which is exactly how the generated
+    proto-check workflow splits into one job per language, each installing its
+    own toolchain and nothing else.
     """
     tc = proto.toolchain
+    selected = set(languages) if languages is not None else set(proto.languages)
     checks: List[ToolCheck] = []
 
-    if proto.go is not None:
+    if proto.go is not None and "go" in selected:
         checks.append(check_protoc(tc.protoc))
         checks.append(check_protoc_gen_go(tc.protoc_gen_go))
         if proto.go.grpc:
@@ -287,13 +307,13 @@ def verify_toolchain(root: Path, proto: ProtoConfig, python_exe: str) -> List[To
         if proto.go.gofmt:
             checks.append(check_gofmt())
 
-    if proto.python is not None:
+    if proto.python is not None and "python" in selected:
         checks.append(check_grpcio_tools(tc.grpcio_tools, python_exe))
         cross = check_bundled_protoc(tc.protoc, python_exe)
         if cross is not None:
             checks.append(cross)
 
-    if proto.typescript is not None:
+    if proto.typescript is not None and "typescript" in selected:
         checks.append(check_proto_loader(tc.proto_loader, root, proto))
 
     return checks

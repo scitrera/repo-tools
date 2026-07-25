@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Iterable, List, Optional
 
+from ..compile_protos.tools import resolve_ts_package_dir
 from ..version_sync.config import CiConfig, SyncConfig
 from ..version_sync.discovery import manifests_for_language
 from ..version_sync.normalize import normalize_python
@@ -32,6 +33,7 @@ UPLOAD_ARTIFACT = "actions/upload-artifact@v7"
 DOWNLOAD_ARTIFACT = "actions/download-artifact@v8"
 GH_RELEASE = "softprops/action-gh-release@v3"
 SETUP_UV = "astral-sh/setup-uv@v9.0.0"
+SETUP_PROTOC = "arduino/setup-protoc@v3"
 
 # Python used for jobs that need an interpreter of their own (building sdists,
 # reading tomllib). Unrelated to the test matrix.
@@ -1140,8 +1142,184 @@ jobs:
 
 
 # (filename, generator) pairs in stable order.
+def _proto_missing_pins(proto) -> List[str]:
+    """Toolchain pins required by the enabled outputs but absent.
+
+    A generated workflow that installs an *unpinned* compiler is worse than no
+    workflow: proto artifacts embed tool versions, so CI would drift against
+    developer machines and the check would fail on files nobody touched. Missing
+    pins are therefore a generation-time error rather than a silent default.
+    """
+    tc = proto.toolchain
+    missing: List[str] = []
+    if proto.go is not None:
+        if tc.protoc is None:
+            missing.append("proto.toolchain.protoc (required by outputs.go)")
+        if tc.protoc_gen_go is None:
+            missing.append(
+                "proto.toolchain.protoc_gen_go (required by outputs.go; set it, or "
+                'declare preferred_versions.go["google.golang.org/protobuf"] to derive it)'
+            )
+        if proto.go.grpc and tc.protoc_gen_go_grpc is None:
+            missing.append(
+                "proto.toolchain.protoc_gen_go_grpc (required by outputs.go with grpc: true)"
+            )
+    if proto.python is not None and tc.grpcio_tools is None:
+        missing.append("proto.toolchain.grpcio_tools (required by outputs.python)")
+    if proto.typescript is not None and tc.proto_loader is None:
+        missing.append("proto.toolchain.proto_loader (required by outputs.typescript)")
+    return missing
+
+
+def _proto_go_job(config: SyncConfig, ci: CiConfig) -> str:
+    proto = config.proto
+    tc = proto.toolchain
+    plugins = [
+        f"          go install google.golang.org/protobuf/cmd/protoc-gen-go@{tc.protoc_gen_go}"
+    ]
+    if proto.go.grpc:
+        plugins.append(
+            "          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc"
+            f"@{tc.protoc_gen_go_grpc}"
+        )
+    plugins_block = "\n".join(plugins)
+    return f"""  proto-check-go:
+    name: compile-protos --check (go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: {CHECKOUT}
+
+      - uses: {SETUP_GO}
+        with:
+          go-version: '{_go_version(config)}'
+          cache: false
+
+      - name: Install protoc
+        uses: {SETUP_PROTOC}
+        with:
+          version: '{tc.protoc}'
+          repo-token: ${{{{ secrets.GITHUB_TOKEN }}}}
+
+      - name: Install Go proto plugins
+        run: |
+{plugins_block}
+
+{_bootstrap_steps(ci)}
+      - name: Verify generated Go code is up to date
+        run: {_rt(ci, "compile-protos --check --lang go")}
+"""
+
+
+def _proto_python_job(config: SyncConfig, ci: CiConfig) -> str:
+    tc = config.proto.toolchain
+    # --python pins codegen to the interpreter that actually has grpcio-tools.
+    # Under the uvx bootstrap repo-tools runs in uv's own ephemeral environment,
+    # where grpc_tools is not importable, so defaulting to sys.executable would
+    # look for the compiler in the wrong place.
+    invocation = (
+        'compile-protos --check --lang python --python "$(which python)"'
+    )
+    return f"""  proto-check-python:
+    name: compile-protos --check (python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: {CHECKOUT}
+
+{_bootstrap_steps(ci, need_python=True)}
+      - name: Install grpcio-tools
+        run: pip install grpcio-tools=={tc.grpcio_tools}
+
+      - name: Verify generated Python code is up to date
+        run: {_rt(ci, invocation)}
+"""
+
+
+def _proto_typescript_job(config: SyncConfig, ci: CiConfig) -> str:
+    # The generator binary lives in the npm package's node_modules/.bin, so the
+    # same resolution the runner uses decides where `npm ci` has to run.
+    pkg_dir = resolve_ts_package_dir(config.root, config.proto)
+    workdir = "."
+    if pkg_dir is not None:
+        try:
+            rel = pkg_dir.relative_to(config.root)
+            workdir = str(rel).replace("\\", "/") or "."
+        except ValueError:
+            workdir = "."
+    return f"""  proto-check-typescript:
+    name: compile-protos --check (typescript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: {CHECKOUT}
+
+      - uses: {SETUP_NODE}
+        with:
+          node-version: '{ci.npm.node_version}'
+
+      - name: Install TypeScript proto tooling
+        run: npm ci
+        working-directory: {workdir}
+
+{_bootstrap_steps(ci)}
+      - name: Verify generated TypeScript code is up to date
+        run: {_rt(ci, "compile-protos --check --lang typescript")}
+"""
+
+
+def build_proto_check(config: SyncConfig, ci: CiConfig) -> str:
+    """Drift check for generated protobuf/gRPC code, one job per language.
+
+    Split per language on purpose: each job provisions only its own toolchain
+    (protoc + Go plugins, or grpcio-tools, or npm), so the three run in parallel
+    instead of serializing one job through every ecosystem's installer.
+    """
+    proto = config.proto
+    if proto.is_empty:
+        return ""
+
+    missing = _proto_missing_pins(proto)
+    if missing:
+        raise ValueError(
+            "proto-check.yml cannot be generated with unpinned tools:\n  - "
+            + "\n  - ".join(missing)
+            + "\nPin them, or add 'proto-check' to ci.skip_workflows to leave this "
+              "workflow unmanaged."
+        )
+
+    paths: List[str] = ["versions.yaml", f"{proto.dir}/**"]
+    for out in (proto.go, proto.python, proto.typescript):
+        if out is not None:
+            paths.append(f"{out.path}/**")
+
+    jobs: List[str] = []
+    if proto.go is not None:
+        jobs.append(_proto_go_job(config, ci))
+    if proto.python is not None:
+        jobs.append(_proto_python_job(config, ci))
+    if proto.typescript is not None:
+        jobs.append(_proto_typescript_job(config, ci))
+
+    return f"""{GENERATED_HEADER}
+name: Proto Check
+
+on:
+  pull_request:
+    paths:
+{_format_paths_block(paths)}
+
+concurrency:
+  group: proto-check-${{{{ github.ref }}}}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+{chr(10).join(jobs)}"""
+
+
 WORKFLOW_GENERATORS = (
     ("version-check.yml", build_version_check),
+    ("proto-check.yml", build_proto_check),
     ("test-python.yml", build_test_python),
     ("test-npm.yml", build_test_npm),
     ("test-go.yml", build_test_go),
@@ -1164,6 +1342,7 @@ __all__ = [
     "GENERATED_HEADER",
     "WORKFLOW_GENERATORS",
     "build_version_check",
+    "build_proto_check",
     "build_test_python",
     "build_test_npm",
     "build_test_go",

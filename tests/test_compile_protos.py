@@ -72,9 +72,25 @@ def test_normalize_version(raw, expected):
     ("\n\nlibprotoc 31.1\n", "31.1"),
     ("", None),
     (None, None),
+    # Error text must never be mistaken for a version. Seen in the wild when
+    # node is off PATH: the last token of the error is the word "directory".
+    ("/usr/bin/env: 'node': No such file or directory", None),
+    ("command not found", None),
+    ("Traceback (most recent call last):", None),
 ])
 def test_parse_version_output(output, expected):
     assert tools._parse_version_output(output) == expected
+
+
+def test_failed_probe_reports_missing_not_a_bogus_version():
+    """A non-zero --version must yield None, not its stderr text."""
+    assert tools._run(["false"]) is None
+    # A command that does not exist at all.
+    assert tools._run(["definitely-not-a-real-binary-xyz"]) is None
+
+
+def test_prerelease_versions_still_parse():
+    assert tools._parse_version_output("protoc-gen-go v1.36.11-rc1") == "1.36.11-rc1"
 
 
 def test_compare_states():
@@ -119,6 +135,41 @@ def test_verify_toolchain_only_probes_needed_tools(repo, monkeypatch):
     cfg = _config(repo)
     keys = {c.key for c in tools.verify_toolchain(cfg.root, cfg.proto, "py")}
     assert keys == {"grpcio_tools", "grpc_tools_protoc"}
+
+
+ALL_LANGS = '''\
+my-pkg: 0.1.0
+proto:
+  dir: api/proto
+  files: [thing.proto]
+  toolchain: {protoc: "33.5", protoc_gen_go: "v1.36.11", protoc_gen_go_grpc: "v1.6.2",
+              grpcio_tools: "1.81.1", proto_loader: "0.8.1"}
+  outputs:
+    go: {path: api/proto}
+    python: {path: pkg/proto}
+    typescript: {path: ts/src/proto, package_dir: ts}
+'''
+
+
+def test_verify_toolchain_honors_language_selection(tmp_path, write_file, monkeypatch):
+    """`--lang X` must not demand the other languages' toolchains.
+
+    This is what lets the generated proto-check workflow run one job per
+    language, each provisioning only its own tools.
+    """
+    monkeypatch.setattr(tools, "grpcio_tools_version", lambda _exe: "1.81.1")
+    monkeypatch.setattr(tools, "bundled_protoc_version", lambda _exe: "33.5")
+    write_file(tmp_path / "versions.yaml", ALL_LANGS)
+    cfg = load_config(tmp_path / "versions.yaml")
+
+    def keys_for(langs):
+        return {c.key for c in tools.verify_toolchain(cfg.root, cfg.proto, "py", languages=langs)}
+
+    assert keys_for(["python"]) == {"grpcio_tools", "grpc_tools_protoc"}
+    assert keys_for(["typescript"]) == {"proto_loader"}
+    assert keys_for(["go"]) == {"protoc", "protoc_gen_go", "protoc_gen_go_grpc", "gofmt"}
+    # Default (None) still means "everything configured".
+    assert len(keys_for(None)) == 7
 
 
 # ── python import rewriting ───────────────────────────────────────────────────
