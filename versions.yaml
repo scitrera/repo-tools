@@ -2,7 +2,7 @@
 # Run: sync-versions             to apply
 # Run: sync-versions --check     to verify (CI-friendly)
 
-scitrera-repo-tools: 0.1.13
+scitrera-repo-tools: 0.1.14
 
 # Pin external runtime + dev dependencies for security & consistency.
 # Literal value form (`>=6.0`, `>=7.0`) is preserved verbatim per the
@@ -28,6 +28,8 @@ ci:
   # workflows exercise the code in the commit under test instead of whatever
   # the last release happened to contain.
   repo_tools_source: "."
+  # Tag-level, not language-level: one `v*.*.*` tag drives every artifact a repo
+  # publishes, so the release belongs to the tag rather than to the python flow.
+  github_release: true
   python:
     verify_tag_version: scitrera-repo-tools
-    github_release: true

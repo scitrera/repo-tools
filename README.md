@@ -299,7 +299,7 @@ without the original repo checkout.
 (`ci.python.publish_requires_tests`, on by default), because a tag push is
 not revocable once it reaches PyPI. Two further gates are opt-in:
 `ci.python.verify_tag_version` refuses to publish when the pushed tag
-disagrees with `versions.yaml`, and `ci.python.github_release` attaches the
+disagrees with `versions.yaml`, and `ci.github_release` attaches the
 built distributions to a GitHub release.
 
 ### Bootstrapping repo-tools inside generated workflows
@@ -356,6 +356,7 @@ ci:
   test_branches: [main, develop]              # default: [main, develop]
   skip_workflows: []                          # workflow basenames (no .yml) to leave unmanaged
   only_workflows: []                          # allowlist; empty = manage everything that renders
+  github_release: false                       # attach built dists to a GitHub release for the tag
   bootstrap_method: uvx                       # uvx | pip; default: uvx
   repo_tools_source: scitrera-repo-tools      # any uv/pip source spec; default: PyPI name
   python:
@@ -365,7 +366,6 @@ ci:
     pypi_environment: pypi                      # GitHub environment, default: pypi
     publish_requires_tests: true                # gate PyPI upload on the test matrix; default: true
     verify_tag_version: null                    # project name; fail if tag != its versions.yaml version
-    github_release: false                       # attach built dists to a GitHub release
   npm:
     node_version: "24"                          # default: "24"
     lint: tsc-noemit                            # tsc-noemit | eslint | none

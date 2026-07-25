@@ -94,7 +94,7 @@ class GoToolchainConfig:
 class CiPythonConfig:
     """Per-language CI knobs for python flows.
 
-    The three publish-side knobs exist because a tag push is irreversible once
+    The two publish-side knobs exist because a tag push is irreversible once
     it reaches PyPI: `publish_requires_tests` gates the upload on the same
     matrix the test workflow runs, and `verify_tag_version` refuses to publish
     when the pushed tag disagrees with versions.yaml. `verify_tag_version` names
@@ -107,7 +107,6 @@ class CiPythonConfig:
     pypi_environment: str = "pypi"
     publish_requires_tests: bool = True
     verify_tag_version: Optional[str] = None        # project name, or None to disable
-    github_release: bool = False
 
 
 @dataclass(frozen=True)
@@ -170,6 +169,12 @@ class CiConfig:
     # does not want, and revisit that list each time a new generator is added.
     # Applied before skip_workflows, which can still subtract from it.
     only_workflows: tuple = ()
+    # Attach built distributions to a GitHub Release for the pushed tag.
+    # Lives at `ci:` level rather than under `ci.python` because a single
+    # `v*.*.*` tag in a polyglot repo drives the Go, Python, npm and container
+    # releases together — the release is a property of the tag, not of one
+    # language's publish flow.
+    github_release: bool = False
     python: CiPythonConfig = field(default_factory=CiPythonConfig)
     npm: CiNpmConfig = field(default_factory=CiNpmConfig)
     go: CiGoConfig = field(default_factory=CiGoConfig)
@@ -487,6 +492,7 @@ _CI_KEYS = (
     "repo_tools_source",
     "skip_workflows",
     "only_workflows",
+    "github_release",
     "python",
     "npm",
     "go",
@@ -499,7 +505,6 @@ _CI_PYTHON_KEYS = (
     "pypi_environment",
     "publish_requires_tests",
     "verify_tag_version",
-    "github_release",
 )
 _CI_NPM_KEYS = ("node_version", "lint", "npm_environment", "use_provenance", "use_oidc")
 _CI_GO_KEYS = ("go_version", "lint", "golangci_version", "enable_govulncheck", "test_args")
@@ -544,8 +549,6 @@ def _parse_ci_python(raw: Any, project_versions: Mapping[str, str]) -> CiPythonC
         kwargs["pypi_environment"] = str(block["pypi_environment"])
     if "publish_requires_tests" in block:
         kwargs["publish_requires_tests"] = bool(block["publish_requires_tests"])
-    if "github_release" in block:
-        kwargs["github_release"] = bool(block["github_release"])
     if "verify_tag_version" in block and block["verify_tag_version"] is not None:
         project = str(block["verify_tag_version"])
         if project not in project_versions:
@@ -682,6 +685,8 @@ def _parse_ci(raw: Any, project_versions: Mapping[str, str]) -> CiConfig:
                 "ci.skip_workflows: expected list of workflow basenames (no .yml)"
             )
         kwargs["skip_workflows"] = tuple(str(s) for s in skip)
+    if "github_release" in block:
+        kwargs["github_release"] = bool(block["github_release"])
     if "only_workflows" in block:
         only = block["only_workflows"]
         if not isinstance(only, list):

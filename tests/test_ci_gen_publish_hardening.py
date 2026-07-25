@@ -99,7 +99,7 @@ def test_github_release_absent_by_default(tmp_path: Path) -> None:
 
 
 def test_github_release_attaches_uploaded_dists(tmp_path: Path) -> None:
-    jobs = _publish(tmp_path, "ci:\n  python:\n    github_release: true\n")["jobs"]
+    jobs = _publish(tmp_path, "ci:\n  github_release: true\n")["jobs"]
 
     upload = next(
         s for s in jobs["publish-py-a"]["steps"] if s.get("name") == "Upload distributions"
@@ -120,7 +120,7 @@ def test_publish_job_graph_is_closed(tmp_path: Path) -> None:
     """Every `needs` target must be a job defined in the same workflow."""
     jobs = _publish(
         tmp_path,
-        "ci:\n  python:\n    verify_tag_version: py-a\n    github_release: true\n",
+        "ci:\n  github_release: true\n  python:\n    verify_tag_version: py-a\n",
     )["jobs"]
     for name, job in jobs.items():
         for dep in job.get("needs", []):

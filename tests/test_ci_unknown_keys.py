@@ -42,6 +42,7 @@ def test_every_documented_key_is_accepted(tmp_path, write_file):
   repo_tools_source: "scitrera-repo-tools==1.2.3"
   skip_workflows: [build-docker]
   only_workflows: [version-check]
+  github_release: true
   python:
     test_versions: ["3.12"]
     lint: ruff
@@ -49,7 +50,6 @@ def test_every_documented_key_is_accepted(tmp_path, write_file):
     pypi_environment: pypi
     publish_requires_tests: false
     verify_tag_version: my-pkg
-    github_release: true
   npm:
     node_version: "24"
     lint: eslint
@@ -71,10 +71,22 @@ def test_every_documented_key_is_accepted(tmp_path, write_file):
 """)
     assert cfg.ci.bootstrap_method == "uvx"
     assert cfg.ci.only_workflows == ("version-check",)
-    assert cfg.ci.python.github_release is True
+    assert cfg.ci.github_release is True
     assert cfg.ci.npm.use_oidc is True
     assert cfg.ci.go.lint == "none"
     assert cfg.ci.docker.build_on_pr is True
+
+
+def test_github_release_moved_off_ci_python(tmp_path, write_file):
+    """It moved to `ci:` level; the old spot must fail rather than be ignored.
+
+    A silently-ignored `ci.python.github_release` would drop the GitHub Release
+    from a tag push with no signal at all, which is worse than a hard error at
+    parse time.
+    """
+    with pytest.raises(ConfigError) as exc:
+        _load(tmp_path, write_file, "  python:\n    github_release: true\n")
+    assert "ci.python: unknown key(s) ['github_release']" in str(exc.value)
 
 
 def test_absent_and_empty_ci_still_fine(tmp_path, write_file):

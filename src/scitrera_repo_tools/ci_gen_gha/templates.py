@@ -479,7 +479,7 @@ def _python_publish_job(
         needs_clause = f"    needs: [ {needs_csv} ]\n"
 
     upload_step = ""
-    if py.github_release:
+    if ci.github_release:
         upload_step = f"""
       - name: Upload distributions
         uses: {UPLOAD_ARTIFACT}
@@ -578,7 +578,7 @@ def build_publish_python(config: SyncConfig, ci: CiConfig) -> str:
         )
         publish_ids.append(f"publish-{node.name}")
 
-    if py.github_release:
+    if ci.github_release:
         parts.append(_python_github_release_job(publish_ids))
 
     jobs = "\n".join(parts)
