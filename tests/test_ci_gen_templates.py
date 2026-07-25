@@ -133,13 +133,15 @@ def test_test_npm_per_project_job(small_repo: Path) -> None:
 
 
 def test_publish_python_topo_needs_chain(small_repo: Path) -> None:
+    """Dependents publish after their dependencies, and both wait on the gates."""
     config = load_config(small_repo / "versions.yaml")
     text = build_publish_python(config, config.ci)
     parsed = yaml.safe_load(text)
 
     jobs = parsed["jobs"]
-    assert jobs["publish-py-a"].get("needs") in (None, [])
-    assert jobs["publish-py-b"]["needs"] == ["publish-py-a"]
+    gates = ["test-py-a", "test-py-b"]
+    assert jobs["publish-py-a"]["needs"] == gates
+    assert jobs["publish-py-b"]["needs"] == gates + ["publish-py-a"]
 
 
 def test_publish_python_release_step_present(small_repo: Path) -> None:

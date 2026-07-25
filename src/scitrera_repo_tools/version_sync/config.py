@@ -92,11 +92,22 @@ class GoToolchainConfig:
 
 @dataclass(frozen=True)
 class CiPythonConfig:
-    """Per-language CI knobs for python flows."""
+    """Per-language CI knobs for python flows.
+
+    The three publish-side knobs exist because a tag push is irreversible once
+    it reaches PyPI: `publish_requires_tests` gates the upload on the same
+    matrix the test workflow runs, and `verify_tag_version` refuses to publish
+    when the pushed tag disagrees with versions.yaml. `verify_tag_version` names
+    a project rather than defaulting to "the" project because a single `v*.*.*`
+    tag cannot identify a project in a multi-project repo.
+    """
     test_versions: tuple = ("3.11", "3.12", "3.13")
     lint: str = "ruff"                              # "ruff" | "none"
     install: str = 'pip install -e ".[test]"'
     pypi_environment: str = "pypi"
+    publish_requires_tests: bool = True
+    verify_tag_version: Optional[str] = None        # project name, or None to disable
+    github_release: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,6 +148,17 @@ class CiDockerConfig:
 class CiConfig:
     """Optional `ci:` block driving the `generate-ci-gha` subcommand."""
     test_branches: tuple = ("main", "develop")
+    # How generated workflows provision scitrera-repo-tools before invoking
+    # `sync-versions`. `uvx` mirrors what the `scripts/` shims do locally
+    # (resolve on demand, no persistent install) so CI and developer machines
+    # run the same resolution path; `pip` is the escape hatch for runners
+    # without uv.
+    bootstrap_method: str = "uvx"                        # "uvx" | "pip"
+    # What to resolve repo-tools *from*. Any uv/pip source spec: a PyPI name
+    # (optionally pinned), a `git+https://...@ref` URL, or a local path. The
+    # repo-tools repo itself sets `.` so its workflows exercise the checked-out
+    # tree rather than a previously published artifact.
+    repo_tools_source: str = "scitrera-repo-tools"
     # Workflow basenames (no .yml) to skip entirely. Use when a generated
     # workflow has been hand-customized and you want the generator to stop
     # managing it. The on-disk file is left untouched and no drift is reported.
@@ -431,6 +453,7 @@ def _parse_go_toolchain(raw: Any) -> GoToolchainConfig:
     )
 
 
+_CI_BOOTSTRAP_METHODS = {"uvx", "pip"}
 _CI_PYTHON_LINT_CHOICES = {"ruff", "none"}
 _CI_NPM_LINT_CHOICES = {"tsc-noemit", "eslint", "none"}
 _CI_GO_LINT_CHOICES = {"golangci-lint", "none"}
@@ -439,7 +462,7 @@ _DOCKER_BUILD_STRATEGIES = {"auto", "qemu", "native"}
 _DOCKER_TEST_PREREQ_CHOICES = {"python", "npm", "go"}
 
 
-def _parse_ci_python(raw: Any) -> CiPythonConfig:
+def _parse_ci_python(raw: Any, project_versions: Mapping[str, str]) -> CiPythonConfig:
     if raw is None:
         return CiPythonConfig()
     block = _expect_mapping(raw, "ci.python")
@@ -461,6 +484,18 @@ def _parse_ci_python(raw: Any) -> CiPythonConfig:
         kwargs["install"] = str(block["install"])
     if "pypi_environment" in block:
         kwargs["pypi_environment"] = str(block["pypi_environment"])
+    if "publish_requires_tests" in block:
+        kwargs["publish_requires_tests"] = bool(block["publish_requires_tests"])
+    if "github_release" in block:
+        kwargs["github_release"] = bool(block["github_release"])
+    if "verify_tag_version" in block and block["verify_tag_version"] is not None:
+        project = str(block["verify_tag_version"])
+        if project not in project_versions:
+            raise ConfigError(
+                f"ci.python.verify_tag_version: '{project}' is not a known "
+                "project in versions.yaml"
+            )
+        kwargs["verify_tag_version"] = project
     return CiPythonConfig(**kwargs)
 
 
@@ -549,12 +584,30 @@ def _parse_ci_docker(raw: Any) -> CiDockerConfig:
     return CiDockerConfig(**kwargs)
 
 
-def _parse_ci(raw: Any) -> CiConfig:
+def _parse_ci(raw: Any, project_versions: Mapping[str, str]) -> CiConfig:
     if raw is None:
         return CiConfig()
     block = _expect_mapping(raw, "ci")
     kwargs: Dict[str, Any] = {}
 
+    if "bootstrap_method" in block:
+        method = str(block["bootstrap_method"])
+        if method not in _CI_BOOTSTRAP_METHODS:
+            raise ConfigError(
+                f"ci.bootstrap_method: expected one of "
+                f"{sorted(_CI_BOOTSTRAP_METHODS)}, got '{method}'"
+            )
+        kwargs["bootstrap_method"] = method
+    if "repo_tools_source" in block:
+        source = str(block["repo_tools_source"]).strip()
+        if not source:
+            raise ConfigError("ci.repo_tools_source: expected non-empty source spec")
+        if "'" in source:
+            raise ConfigError(
+                "ci.repo_tools_source: single quotes are not allowed; the value "
+                "is embedded in a single-quoted shell argument"
+            )
+        kwargs["repo_tools_source"] = source
     if "test_branches" in block:
         branches = block["test_branches"]
         if not isinstance(branches, list) or not branches:
@@ -568,7 +621,7 @@ def _parse_ci(raw: Any) -> CiConfig:
             )
         kwargs["skip_workflows"] = tuple(str(s) for s in skip)
     if "python" in block:
-        kwargs["python"] = _parse_ci_python(block["python"])
+        kwargs["python"] = _parse_ci_python(block["python"], project_versions)
     if "npm" in block:
         kwargs["npm"] = _parse_ci_npm(block["npm"])
     if "go" in block:
@@ -902,7 +955,7 @@ def load_config(yaml_path: Path, *, root: Optional[Path] = None) -> SyncConfig:
     deps = _parse_dependency_mappings(data.get("dependency_mappings"))
     sources = _parse_sources(data.get("sources"))
     go_toolchain = _parse_go_toolchain(data.get("go_toolchain"))
-    ci = _parse_ci(data.get("ci"))
+    ci = _parse_ci(data.get("ci"), project_versions)
     docker = _parse_docker(data.get("docker"), project_versions)
     proto = _parse_proto(data.get("proto"), preferred)
 
