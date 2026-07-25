@@ -7,10 +7,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import yaml
 
+from .normalize import normalize_go
 from .strategies.base import validate_version
 
 RESERVED_KEYS = (
@@ -21,6 +22,7 @@ RESERVED_KEYS = (
     "go_toolchain",
     "ci",
     "docker",
+    "proto",
 )
 
 
@@ -176,6 +178,114 @@ class DockerConfig:
 
 
 @dataclass(frozen=True)
+class ProtoToolchainConfig:
+    """Exact pins for every binary that participates in proto codegen.
+
+    These are *toolchain* pins, not manifest dependencies: unlike
+    `preferred_versions`, nothing rewrites these into a manifest file. They are
+    read by `compile-protos`, which verifies the installed tools before
+    generating anything — so a compiler mismatch fails loudly instead of
+    silently emitting artifacts whose embedded version headers drift.
+
+    `protoc` and `grpcio_tools` are two *independent* compilers: `grpc_tools`
+    bundles its own libprotoc, so the pair must be reconciled deliberately
+    rather than assumed consistent. `compile-protos` cross-checks them.
+
+    Versions are stored as written except the two Go plugin pins, which are
+    normalized to Go's `v`-prefixed module form so they can be fed straight to
+    `go install <pkg>@<version>`.
+    """
+    protoc: Optional[str] = None
+    protoc_gen_go: Optional[str] = None
+    protoc_gen_go_grpc: Optional[str] = None
+    grpcio_tools: Optional[str] = None
+    proto_loader: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ProtoGoOutput:
+    """Go codegen target (`protoc-gen-go` + `protoc-gen-go-grpc`)."""
+    path: str
+    paths: str = "source_relative"       # "source_relative" | "import"
+    grpc: bool = True
+    gofmt: bool = True
+
+
+@dataclass(frozen=True)
+class ProtoPythonOutput:
+    """Python codegen target (`grpc_tools.protoc`).
+
+    `fix_relative_imports` addresses a universal protobuf-Python problem rather
+    than a project quirk: generated `_pb2_grpc.py` / cross-importing `_pb2.py`
+    modules reference their siblings by bare `import foo_pb2`, which fails once
+    the generated code lives inside a package.
+    """
+    path: str
+    stubs: bool = True                   # --pyi_out
+    grpc: bool = True
+    fix_relative_imports: bool = True
+    ensure_init_py: bool = True
+
+
+@dataclass(frozen=True)
+class ProtoTypeScriptOutput:
+    """TypeScript codegen target.
+
+    `generator` is an extension point: the emitted output shape differs
+    fundamentally between generators, so the choice is modelled in config from
+    the start even though only `proto-loader` is wired up today. The runner
+    reports unimplemented generators explicitly.
+
+    `package_dir` is the npm package root whose `node_modules/.bin` holds the
+    generator binary. When omitted it is discovered by walking up from `path`
+    to the nearest `package.json`.
+    """
+    path: str
+    generator: str = "proto-loader"       # proto-loader | ts-proto | protoc-gen-ts
+    grpc_lib: str = "@grpc/grpc-js"
+    package_dir: Optional[str] = None
+    options: tuple = (
+        "--longs=String",
+        "--enums=String",
+        "--defaults",
+        "--oneofs",
+        "--includeComments",
+    )
+
+
+@dataclass(frozen=True)
+class ProtoConfig:
+    """Optional `proto:` block driving the `compile-protos` subcommand.
+
+    Inputs (`dir`, `files`), toolchain pins and per-language outputs live
+    together deliberately: pins divorced from the code that consumes them are
+    how a pin silently becomes inert.
+    """
+    dir: Optional[str] = None
+    files: tuple = ()
+    toolchain: ProtoToolchainConfig = field(default_factory=ProtoToolchainConfig)
+    go: Optional[ProtoGoOutput] = None
+    python: Optional[ProtoPythonOutput] = None
+    typescript: Optional[ProtoTypeScriptOutput] = None
+
+    @property
+    def is_empty(self) -> bool:
+        return self.dir is None or not self.files
+
+    @property
+    def languages(self) -> tuple:
+        """Enabled output languages, in deterministic order."""
+        out = []
+        if self.go is not None:
+            out.append("go")
+        if self.python is not None:
+            out.append("python")
+        if self.typescript is not None:
+            out.append("typescript")
+        return tuple(out)
+
+
+@dataclass(frozen=True)
 class SyncConfig:
     yaml_path: Path
     root: Path
@@ -187,6 +297,7 @@ class SyncConfig:
     go_toolchain: GoToolchainConfig = field(default_factory=lambda: GoToolchainConfig())
     ci: CiConfig = field(default_factory=CiConfig)
     docker: DockerConfig = field(default_factory=DockerConfig)
+    proto: ProtoConfig = field(default_factory=ProtoConfig)
 
 
 def _expect_mapping(value: Any, where: str) -> Dict[str, Any]:
@@ -554,6 +665,202 @@ def _parse_docker(raw: Any, project_versions: Mapping[str, str]) -> DockerConfig
     return DockerConfig(**kwargs)
 
 
+_PROTO_TOOLCHAIN_KEYS = (
+    "protoc",
+    "protoc_gen_go",
+    "protoc_gen_go_grpc",
+    "grpcio_tools",
+    "proto_loader",
+)
+# Go module pins get `v`-normalized so they can be passed to `go install pkg@ver`.
+_PROTO_GO_MODULE_PINS = ("protoc_gen_go", "protoc_gen_go_grpc")
+_PROTO_TS_GENERATORS = {"proto-loader", "ts-proto", "protoc-gen-ts"}
+_PROTO_GO_PATHS_MODES = {"source_relative", "import"}
+_PROTO_KEYS = ("dir", "files", "toolchain", "outputs")
+_PROTO_OUTPUT_KEYS = {
+    "go": ("path", "paths", "grpc", "gofmt"),
+    "python": ("path", "stubs", "grpc", "fix_relative_imports", "ensure_init_py"),
+    "typescript": ("path", "generator", "grpc_lib", "package_dir", "options"),
+}
+
+
+def _reject_unknown(block: Mapping[str, Any], allowed: Iterable[str], where: str) -> None:
+    """Fail on unrecognized keys.
+
+    Deliberately stricter than the older blocks in this file: the entire point
+    of the `proto:` block is to stop pins from silently doing nothing, so a
+    typo'd key must be an error rather than a no-op.
+    """
+    unknown = sorted(set(block) - set(allowed))
+    if unknown:
+        raise ConfigError(
+            f"{where}: unknown key(s) {unknown}; expected one of {sorted(allowed)}"
+        )
+
+
+def _proto_version(block: Mapping[str, Any], key: str, where: str) -> Optional[str]:
+    if key not in block or block[key] is None:
+        return None
+    val = block[key]
+    if not isinstance(val, (str, int, float)):
+        raise ConfigError(f"{where}.{key}: expected version string")
+    text = str(val).strip()
+    if not text:
+        raise ConfigError(f"{where}.{key}: expected non-empty version string")
+    return text
+
+
+def _parse_proto_toolchain(raw: Any, preferred: PreferredVersions) -> ProtoToolchainConfig:
+    block = _expect_mapping(raw, "proto.toolchain")
+    _reject_unknown(block, _PROTO_TOOLCHAIN_KEYS, "proto.toolchain")
+
+    kwargs: Dict[str, Any] = {}
+    for key in _PROTO_TOOLCHAIN_KEYS:
+        val = _proto_version(block, key, "proto.toolchain")
+        if val is not None:
+            kwargs[key] = val
+
+    # `protoc_gen_go: null` (or absent) derives from the go module pin, since
+    # protoc-gen-go ships *from* google.golang.org/protobuf. Keeping one source
+    # of truth beats restating a version that go.mod already governs.
+    if kwargs.get("protoc_gen_go") is None:
+        derived = preferred.for_language("go").get("google.golang.org/protobuf")
+        if derived is not None and str(derived).strip():
+            kwargs["protoc_gen_go"] = str(derived).strip()
+
+    for key in _PROTO_GO_MODULE_PINS:
+        if kwargs.get(key) is not None:
+            kwargs[key] = normalize_go(kwargs[key])
+
+    return ProtoToolchainConfig(**kwargs)
+
+
+def _proto_bool(block: Mapping[str, Any], key: str, where: str, default: bool) -> bool:
+    if key not in block:
+        return default
+    val = block[key]
+    if not isinstance(val, bool):
+        raise ConfigError(f"{where}.{key}: expected boolean, got {type(val).__name__}")
+    return val
+
+
+def _proto_out_path(block: Mapping[str, Any], where: str) -> str:
+    path = block.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise ConfigError(f"{where}.path: required string (output directory)")
+    return path.strip()
+
+
+def _parse_proto_outputs(raw: Any) -> Dict[str, Any]:
+    block = _expect_mapping(raw, "proto.outputs")
+    _reject_unknown(block, _PROTO_OUTPUT_KEYS.keys(), "proto.outputs")
+
+    out: Dict[str, Any] = {}
+
+    if "go" in block:
+        go_block = _expect_mapping(block["go"], "proto.outputs.go")
+        _reject_unknown(go_block, _PROTO_OUTPUT_KEYS["go"], "proto.outputs.go")
+        paths_mode = str(go_block.get("paths", "source_relative"))
+        if paths_mode not in _PROTO_GO_PATHS_MODES:
+            raise ConfigError(
+                f"proto.outputs.go.paths: expected one of "
+                f"{sorted(_PROTO_GO_PATHS_MODES)}, got '{paths_mode}'"
+            )
+        out["go"] = ProtoGoOutput(
+            path=_proto_out_path(go_block, "proto.outputs.go"),
+            paths=paths_mode,
+            grpc=_proto_bool(go_block, "grpc", "proto.outputs.go", True),
+            gofmt=_proto_bool(go_block, "gofmt", "proto.outputs.go", True),
+        )
+
+    if "python" in block:
+        py_block = _expect_mapping(block["python"], "proto.outputs.python")
+        _reject_unknown(py_block, _PROTO_OUTPUT_KEYS["python"], "proto.outputs.python")
+        out["python"] = ProtoPythonOutput(
+            path=_proto_out_path(py_block, "proto.outputs.python"),
+            stubs=_proto_bool(py_block, "stubs", "proto.outputs.python", True),
+            grpc=_proto_bool(py_block, "grpc", "proto.outputs.python", True),
+            fix_relative_imports=_proto_bool(
+                py_block, "fix_relative_imports", "proto.outputs.python", True
+            ),
+            ensure_init_py=_proto_bool(
+                py_block, "ensure_init_py", "proto.outputs.python", True
+            ),
+        )
+
+    if "typescript" in block:
+        ts_block = _expect_mapping(block["typescript"], "proto.outputs.typescript")
+        _reject_unknown(
+            ts_block, _PROTO_OUTPUT_KEYS["typescript"], "proto.outputs.typescript"
+        )
+        generator = str(ts_block.get("generator", "proto-loader"))
+        if generator not in _PROTO_TS_GENERATORS:
+            raise ConfigError(
+                f"proto.outputs.typescript.generator: expected one of "
+                f"{sorted(_PROTO_TS_GENERATORS)}, got '{generator}'"
+            )
+        options_raw = ts_block.get("options")
+        kwargs: Dict[str, Any] = {}
+        if options_raw is not None:
+            if not isinstance(options_raw, list):
+                raise ConfigError(
+                    "proto.outputs.typescript.options: expected list of CLI flags"
+                )
+            kwargs["options"] = tuple(str(o) for o in options_raw)
+        pkg_dir = ts_block.get("package_dir")
+        if pkg_dir is not None:
+            if not isinstance(pkg_dir, str) or not pkg_dir.strip():
+                raise ConfigError(
+                    "proto.outputs.typescript.package_dir: expected non-empty string"
+                )
+            kwargs["package_dir"] = pkg_dir.strip()
+        out["typescript"] = ProtoTypeScriptOutput(
+            path=_proto_out_path(ts_block, "proto.outputs.typescript"),
+            generator=generator,
+            grpc_lib=str(ts_block.get("grpc_lib", "@grpc/grpc-js")),
+            **kwargs,
+        )
+
+    return out
+
+
+def _parse_proto(raw: Any, preferred: PreferredVersions) -> ProtoConfig:
+    if raw is None:
+        return ProtoConfig()
+    block = _expect_mapping(raw, "proto")
+    _reject_unknown(block, _PROTO_KEYS, "proto")
+
+    proto_dir = block.get("dir")
+    if not isinstance(proto_dir, str) or not proto_dir.strip():
+        raise ConfigError("proto.dir: required string (directory containing .proto files)")
+
+    files_raw = block.get("files")
+    if not isinstance(files_raw, list) or not files_raw:
+        raise ConfigError("proto.files: expected non-empty list of .proto filenames")
+    files = tuple(str(f).strip() for f in files_raw)
+    if any(not f for f in files):
+        raise ConfigError("proto.files: entries must be non-empty filenames")
+    bad_ext = [f for f in files if not f.endswith(".proto")]
+    if bad_ext:
+        raise ConfigError(f"proto.files: entries must end in '.proto', got {bad_ext}")
+    dupes = sorted({f for f in files if files.count(f) > 1})
+    if dupes:
+        raise ConfigError(f"proto.files: duplicate entries {dupes}")
+
+    outputs = _parse_proto_outputs(block.get("outputs"))
+    if not outputs:
+        raise ConfigError(
+            "proto.outputs: at least one of 'go', 'python', 'typescript' is required"
+        )
+
+    return ProtoConfig(
+        dir=proto_dir.strip(),
+        files=files,
+        toolchain=_parse_proto_toolchain(block.get("toolchain"), preferred),
+        **outputs,
+    )
+
+
 def _parse_sources(raw: Any) -> SourcesConfig:
     by_lang: Dict[str, List[str]] = {}
     raw_map = _expect_mapping(raw, "sources")
@@ -597,6 +904,7 @@ def load_config(yaml_path: Path, *, root: Optional[Path] = None) -> SyncConfig:
     go_toolchain = _parse_go_toolchain(data.get("go_toolchain"))
     ci = _parse_ci(data.get("ci"))
     docker = _parse_docker(data.get("docker"), project_versions)
+    proto = _parse_proto(data.get("proto"), preferred)
 
     return SyncConfig(
         yaml_path=yaml_path,
@@ -609,6 +917,7 @@ def load_config(yaml_path: Path, *, root: Optional[Path] = None) -> SyncConfig:
         go_toolchain=go_toolchain,
         ci=ci,
         docker=docker,
+        proto=proto,
     )
 
 
@@ -626,6 +935,11 @@ __all__ = [
     "CiConfig",
     "DockerImage",
     "DockerConfig",
+    "ProtoToolchainConfig",
+    "ProtoGoOutput",
+    "ProtoPythonOutput",
+    "ProtoTypeScriptOutput",
+    "ProtoConfig",
     "SyncConfig",
     "load_config",
     "RESERVED_KEYS",

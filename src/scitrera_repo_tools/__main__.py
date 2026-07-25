@@ -20,6 +20,7 @@ def main() -> None:
             "  missing-deps     Print pyproject.toml deps that are not yet installed\n"
             "  directory-split  Split a directory into N approximately-equal buckets\n"
             "  generate-ci-gha      Generate GitHub Actions workflows from versions.yaml\n"
+            "  compile-protos       Compile .proto files per the versions.yaml proto block\n"
         )
         sys.exit(0 if argv else 1)
 
@@ -45,6 +46,10 @@ def main() -> None:
         from scitrera_repo_tools.ci_gen_gha.cli import main as ci_main
         sys.argv = ["generate-ci-gha", *remaining]
         ci_main()
+    elif subcommand == "compile-protos":
+        from scitrera_repo_tools.compile_protos.cli import main as protos_main
+        sys.argv = ["compile-protos", *remaining]
+        protos_main()
     else:
         print(f"unknown subcommand: {subcommand}", file=sys.stderr)
         sys.exit(2)

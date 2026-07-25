@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scitrera-repo-tools"
-version = "0.1.10"
+version = "0.1.11"
 description = "Centralized monorepo version-sync tool driven by versions.yaml."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -39,6 +39,7 @@ npm-audit = "scitrera_repo_tools.npm_audit.cli:main"
 missing-deps = "scitrera_repo_tools.missing_deps:main"
 directory-split = "scitrera_repo_tools.directory_split:main"
 generate-ci-gha = "scitrera_repo_tools.ci_gen_gha.cli:main"
+compile-protos = "scitrera_repo_tools.compile_protos.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/scitrera/repo-tools"

@@ -1,8 +1,9 @@
 # scitrera-repo-tools
 
 Monorepo maintenance toolkit. The primary subcommand, `sync-versions`, is
-driven by `versions.yaml`; auxiliary subcommands (`npm-audit`, `missing-deps`,
-`directory-split`) reuse the same config or stand alone.
+driven by `versions.yaml`; further subcommands (`generate-ci-gha`,
+`compile-protos`, `npm-audit`, `missing-deps`, `directory-split`) reuse the same
+config or stand alone.
 
 ## Install
 
@@ -103,6 +104,115 @@ go_toolchain:
   go:        "1.25"      # rewrites the `go X.Y` directive
   toolchain: "1.25.10"   # rewrites `toolchain goX.Y.Z` (Go 1.21+ feature)
 ```
+
+## `compile-protos`
+
+Compiles `.proto` files for Go, Python and TypeScript from a single `proto:`
+block, after verifying that the installed toolchain matches the pins in
+`proto.toolchain`.
+
+```bash
+compile-protos                     # regenerate; write anything missing or stale
+compile-protos --check             # write nothing; exit 1 on drift (CI-friendly)
+compile-protos --lang go           # restrict to one output language (repeatable)
+compile-protos --python .venv/bin/python   # interpreter for grpc_tools.protoc
+compile-protos --skip-verify       # bypass pin verification (expect drift)
+```
+
+### Why the pins are the point
+
+Generated protobuf artifacts embed the versions of the tools that produced them
+(`// protoc v5.27.1`, `# Protobuf Python Version: 6.31.1`). An unpinned compiler
+therefore turns any byte-equality check into a coin flip: CI installs a
+different `protoc` than a developer has, regenerates, and reports drift in files
+nobody edited. `compile-protos` verifies every required tool *before* generating
+anything and fails with the exact install command, so a mismatch surfaces
+locally instead of as a confusing CI diff.
+
+Note that `protoc` and `grpcio-tools` are two **independent** compilers —
+`grpc_tools` bundles its own libprotoc — so a repo can easily end up with Go
+artifacts stamped by one and Python artifacts stamped by another. The bundled
+protoc is cross-checked (major version) against the `protoc` pin to catch
+exactly that.
+
+### `proto:` block in `versions.yaml`
+
+Inputs, toolchain pins and outputs live in one block on purpose: pins kept apart
+from the code that consumes them are how a pin silently becomes inert.
+
+```yaml
+proto:
+  # ── inputs ──
+  dir: api/proto                                       # required
+  files: [aether.proto, sandbox_relay_tunnel.proto]    # required, non-empty
+
+  # ── toolchain: exact pins, verified before codegen ──
+  toolchain:
+    protoc: "31.1"               # standalone protoc (Go path). Use an exact
+                                 # version, never a floating range like 27.x
+    protoc_gen_go: null          # null/omitted → derived from
+                                 # preferred_versions.go["google.golang.org/protobuf"],
+                                 # since protoc-gen-go ships from that module
+    protoc_gen_go_grpc: "v1.6.2" # SEPARATE nested module — NOT derivable from
+                                 # google.golang.org/grpc
+    grpcio_tools: "1.76.0"
+    proto_loader: "0.8.1"
+
+  # ── outputs: at least one required; a language is enabled by its presence ──
+  outputs:
+    go:
+      path: api/proto
+      paths: source_relative     # source_relative | import
+      grpc: true                 # also run protoc-gen-go-grpc
+      gofmt: true
+    python:
+      path: sdk/python-client/scitrera_aether_client/proto
+      stubs: true                # --pyi_out
+      grpc: true
+      fix_relative_imports: true # rewrite bare sibling `import foo_pb2`
+      ensure_init_py: true       # only when the file is absent
+    typescript:
+      path: sdk/typescript/src/proto
+      generator: proto-loader    # proto-loader | ts-proto | protoc-gen-ts
+      grpc_lib: "@grpc/grpc-js"
+      package_dir: sdk/typescript  # npm root holding node_modules/.bin;
+                                   # discovered from `path` when omitted
+      options: [--longs=String, --enums=String, --defaults, --oneofs, --includeComments]
+```
+
+The two Go plugin pins are normalized to Go's `v`-prefixed module form, so
+either `1.6.2` or `v1.6.2` is accepted and both render as `v1.6.2`.
+
+Unknown keys are rejected at every level of this block — stricter than the older
+blocks in `versions.yaml`, and deliberately so. The whole purpose here is to stop
+a pin from quietly doing nothing, so a typo must be an error, not a no-op.
+
+`fix_relative_imports` solves a universal protobuf-Python problem, not a project
+quirk: generated `_pb2_grpc.py` and cross-importing `_pb2.py` modules reference
+siblings as `import foo_pb2`, which breaks once the generated code lives inside
+a package.
+
+### Behavior
+
+Codegen always runs into a temporary mirror of the repo layout first; the result
+is then either compared (`--check`) or copied into place. Consequences worth
+relying on:
+
+- **Untracked files are caught.** `--check` enumerates the *generated* set, so a
+  generated file that was never committed reports as `missing`. A `git diff`
+  based check cannot see it — untracked files don't appear in a diff — which is a
+  common way generated code goes absent from a commit while CI stays green.
+- **Post-processing is scoped.** gofmt and import rewrites only ever touch
+  freshly generated files, so checked-in sources sharing an output directory are
+  never reformatted.
+- **Failures are atomic.** A codegen error leaves the working tree untouched.
+- `ensure_init_py` creates `__init__.py` only when the real tree lacks one, so an
+  existing package initializer with content is never clobbered.
+
+Only `proto-loader` is wired up for TypeScript today. The other generators are
+accepted by the schema — their output shapes differ fundamentally, so the choice
+belongs in config from the start — and the runner reports them as unimplemented
+rather than failing obscurely.
 
 ## `npm-audit`
 
