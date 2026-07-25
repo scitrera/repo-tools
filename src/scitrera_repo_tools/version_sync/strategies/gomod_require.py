@@ -55,7 +55,7 @@ def rewrite_gomod_require(
 
     Returns (changed, old_version_with_v_prefix).
     """
-    del resolve_local_refs  # noqa: see docstring
+    del resolve_local_refs  # accepted for signature parity; see docstring
     bare = new_requirement[1:] if new_requirement.startswith("v") else new_requirement
 
     text = _read_text(path)

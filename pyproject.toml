@@ -48,6 +48,13 @@ Repository = "https://github.com/scitrera/repo-tools"
 [tool.hatch.build.targets.wheel]
 packages = ["src/scitrera_repo_tools"]
 
+[tool.ruff.lint]
+# Selected explicitly rather than relying on ruff's defaults: 0.16 widened the
+# default set, which turns a linter upgrade into hundreds of findings on an
+# unrelated PR. Pinning the version alone is not enough — the rule set has to
+# be pinned too. These are the rules that were already in effect.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
