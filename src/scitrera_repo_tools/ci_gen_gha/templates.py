@@ -247,7 +247,12 @@ on:
   workflow_call:
 
 concurrency:
-  group: test-python-${{{{ github.ref }}}}
+  # Keyed on the branch, not the ref: a push to a branch that already has an
+  # open PR fires both `push` and `pull_request`, and github.ref differs between
+  # them (refs/heads/X vs refs/pull/N/merge) so they would not otherwise
+  # collapse. github.head_ref is set only for pull_request events, so both
+  # resolve to the same branch name and the redundant run is cancelled.
+  group: test-python-${{{{ github.head_ref || github.ref_name }}}}
   cancel-in-progress: true
 
 permissions:
@@ -357,7 +362,26 @@ def _go_lint_job(project: str, project_dir: str, ci: CiConfig) -> str:
 """
 
 
-def _go_security_job(project: str, project_dir: str, go_version: str) -> str:
+def _go_security_job(project: str, project_dir: str, go_version: str, ci: CiConfig) -> str:
+    """govulncheck for one module, filtered through the accepted-risk allow-list.
+
+    govulncheck has no native suppression, so the scan runs with `-format json`
+    and its findings are compared against `ci.go.govulncheck_ignore` here. That
+    is deliberately narrower than marking the whole step non-blocking: a
+    genuinely new advisory still fails the build, and only the specific IDs that
+    were reviewed are waived.
+
+    Only *called* findings gate the build. govulncheck also reports advisories
+    that are merely present in the module graph but never reached; those are not
+    a vulnerability in this binary and would otherwise force allow-list entries
+    for code that cannot execute.
+    """
+    go = ci.go
+    ignore_ids = " ".join(vid for vid, _ in go.govulncheck_ignore)
+    reasons = "".join(
+        f"          # {vid}: {reason}\n" for vid, reason in go.govulncheck_ignore
+    )
+    reason_block = f"\n{reasons}" if reasons else "\n"
     return f"""  security-{project}:
     name: govulncheck {project}
     runs-on: ubuntu-latest
@@ -370,11 +394,47 @@ def _go_security_job(project: str, project_dir: str, go_version: str) -> str:
           cache-dependency-path: {project_dir}/go.sum
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@{go.govulncheck_version}
 
       - name: Run govulncheck
-        run: govulncheck ./...
         working-directory: {project_dir}
+        env:{reason_block}          IGNORED_ADVISORIES: "{ignore_ids}"
+        run: |
+          set -uo pipefail
+          report="$RUNNER_TEMP/govulncheck-{project}.json"
+          # Exit status is non-zero when anything is found; the JSON is what we
+          # judge on, so do not let `set -e` stop us before reading it.
+          govulncheck -format json ./... > "$report"
+          status=$?
+          if [ ! -s "$report" ]; then
+            echo "::error::govulncheck produced no output (exit $status)"
+            exit 1
+          fi
+
+          # A finding with a function in its trace is reachable from this module.
+          called=$(jq -r 'select(has("finding")) | .finding
+                          | select((.trace[0].function? // null) != null) | .osv' \
+                     "$report" | sort -u)
+
+          fail=0
+          for vuln in $called; do
+            if printf '%s\\n' $IGNORED_ADVISORIES | grep -qx "$vuln"; then
+              echo "::notice::$vuln reachable but allow-listed (see ci.go.govulncheck_ignore)"
+            else
+              echo "::error::$vuln is reachable and not allow-listed — see https://pkg.go.dev/vuln/$vuln"
+              fail=1
+            fi
+          done
+
+          # An allow-list entry that no longer matches anything is stale: the
+          # dependency was fixed or dropped, and the waiver should go with it.
+          for vuln in $IGNORED_ADVISORIES; do
+            if ! printf '%s\\n' $called | grep -qx "$vuln"; then
+              echo "::warning::$vuln is allow-listed but no longer reachable; drop it from ci.go.govulncheck_ignore"
+            fi
+          done
+
+          [ "$fail" = 0 ]
 """
 
 
@@ -399,7 +459,7 @@ def build_test_go(config: SyncConfig, ci: CiConfig) -> str:
                 _go_lint_job(p, pdir, ci).replace(_go_version_placeholder, go_version)
             )
         if ci.go.enable_govulncheck:
-            jobs.append(_go_security_job(p, pdir, go_version))
+            jobs.append(_go_security_job(p, pdir, go_version, ci))
 
     return f"""{GENERATED_HEADER}
 name: Test (Go)
@@ -412,7 +472,12 @@ on:
   workflow_call:
 
 concurrency:
-  group: test-go-${{{{ github.ref }}}}
+  # Keyed on the branch, not the ref: a push to a branch that already has an
+  # open PR fires both `push` and `pull_request`, and github.ref differs between
+  # them (refs/heads/X vs refs/pull/N/merge) so they would not otherwise
+  # collapse. github.head_ref is set only for pull_request events, so both
+  # resolve to the same branch name and the redundant run is cancelled.
+  group: test-go-${{{{ github.head_ref || github.ref_name }}}}
   cancel-in-progress: true
 
 permissions:
@@ -443,7 +508,12 @@ on:
   workflow_call:
 
 concurrency:
-  group: test-npm-${{{{ github.ref }}}}
+  # Keyed on the branch, not the ref: a push to a branch that already has an
+  # open PR fires both `push` and `pull_request`, and github.ref differs between
+  # them (refs/heads/X vs refs/pull/N/merge) so they would not otherwise
+  # collapse. github.head_ref is set only for pull_request events, so both
+  # resolve to the same branch name and the redundant run is cancelled.
+  group: test-npm-${{{{ github.head_ref || github.ref_name }}}}
   cancel-in-progress: true
 
 permissions:

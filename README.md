@@ -323,6 +323,56 @@ Because the root tag drives everything, submodule tags like `api/v1.2.3` do not
 match the `v*.*.*` filters and trigger nothing — which is correct: they are the
 artifact, not the cause.
 
+### Accepted-risk advisories (`govulncheck_ignore`)
+
+govulncheck has no native suppression mechanism, so the generated security job
+runs it with `-format json` and filters the findings itself:
+
+```yaml
+ci:
+  go:
+    govulncheck_ignore:
+      - id: GO-2026-5668
+        reason: "docker/docker; no upstream fix; tracked in SECURITY.md"
+```
+
+`reason` is required — an allow-list entry is a security decision and the
+workflow should record who accepted what. The reason is emitted as a comment
+beside the id in the generated YAML.
+
+This is deliberately narrower than marking the step `continue-on-error`, which
+is the obvious shortcut and the wrong one: it suppresses *new* advisories too,
+so the scan quietly stops being a control. Here only the reviewed ids are
+waived, and anything else still fails the build.
+
+Two further behaviours worth knowing:
+
+- **Only reachable findings gate the build.** govulncheck also reports
+  advisories that are merely present in the module graph but never called;
+  those are not a vulnerability in the built binary and would otherwise force
+  allow-list entries for code that cannot execute.
+- **Stale entries are reported.** An allow-listed id that no longer matches any
+  finding emits a warning, so the list cannot rot into a permanent blanket
+  after the dependency is fixed or dropped.
+
+### Duplicate runs on push + pull_request
+
+The test workflows trigger on both events, so pushing to a branch that already
+has an open PR fires twice — most visibly for a `develop` -> `main` PR, where
+`develop` is in both trigger lists. `github.ref` differs between the two events
+(`refs/heads/X` vs `refs/pull/N/merge`), so a concurrency group keyed on it will
+not collapse them. The generated workflows key on the branch instead:
+
+```yaml
+concurrency:
+  group: test-go-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+```
+
+`github.head_ref` is set only for `pull_request`, so both events resolve to the
+same branch name and the redundant run is cancelled rather than run to
+completion.
+
 ### Reusing test workflows
 
 `test-python.yml`, `test-npm.yml` and `test-go.yml` are generated with a
@@ -429,6 +479,8 @@ ci:
     test_args: "-race -count=1"
     coverage: false                             # add -coverprofile/-covermode + upload artifact
     module_tags: none                           # none | verify | push (see publish-go below)
+    govulncheck_version: "v1.1.4"               # pinned; an unpinned scanner reddens unrelated PRs
+    govulncheck_ignore: []                      # accepted-risk advisories; see below
   docker:
     default_platforms: [linux/amd64, linux/arm64]
     platform_runners:                           # native runners; missing platforms fall back to QEMU

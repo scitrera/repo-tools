@@ -146,6 +146,15 @@ class CiGoConfig:
     # module-path/directory consistency check that can legitimately fail a repo
     # whose layout was never valid for `go get`.
     module_tags: str = "none"
+    # govulncheck itself is a tool whose findings change over time; pin it so an
+    # upstream release cannot redden an unrelated PR.
+    govulncheck_version: str = "v1.1.4"
+    # Advisories to treat as accepted risk, as {id, reason} pairs. govulncheck
+    # has no native suppression, so the generated job filters its JSON output
+    # against this list. A reason is required: an allow-list entry is a security
+    # decision and must say who decided what. Entries that no longer match any
+    # finding are reported so the list cannot quietly rot.
+    govulncheck_ignore: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -546,6 +555,8 @@ _CI_GO_KEYS = (
     "test_args",
     "coverage",
     "module_tags",
+    "govulncheck_version",
+    "govulncheck_ignore",
 )
 _CI_DOCKER_KEYS = (
     "default_platforms",
@@ -653,6 +664,29 @@ def _parse_ci_go(raw: Any) -> CiGoConfig:
         kwargs["test_args"] = str(block["test_args"])
     if "coverage" in block:
         kwargs["coverage"] = _expect_bool(block, "coverage", "ci.go", False)
+    if "govulncheck_version" in block:
+        kwargs["govulncheck_version"] = str(block["govulncheck_version"])
+    if "govulncheck_ignore" in block:
+        raw_ignore = block["govulncheck_ignore"]
+        if not isinstance(raw_ignore, list):
+            raise ConfigError(
+                "ci.go.govulncheck_ignore: expected a list of {id, reason} mappings"
+            )
+        entries = []
+        for item in raw_ignore:
+            entry = _expect_mapping(item, "ci.go.govulncheck_ignore[]")
+            _reject_unknown(entry, ("id", "reason"), "ci.go.govulncheck_ignore[]")
+            vid = str(entry.get("id", "")).strip()
+            reason = str(entry.get("reason", "")).strip()
+            if not vid:
+                raise ConfigError("ci.go.govulncheck_ignore[].id: required")
+            if not reason:
+                raise ConfigError(
+                    f"ci.go.govulncheck_ignore[{vid}].reason: required — an "
+                    "allow-listed advisory must record why it is accepted"
+                )
+            entries.append((vid, reason))
+        kwargs["govulncheck_ignore"] = tuple(entries)
     if "module_tags" in block:
         mode = str(block["module_tags"])
         if mode not in _CI_GO_MODULE_TAG_MODES:
