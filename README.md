@@ -326,7 +326,8 @@ artifact, not the cause.
 ### Reusing test workflows
 
 `test-python.yml`, `test-npm.yml` and `test-go.yml` are generated with a
-`workflow_call:` trigger, and the release workflows gate on them with
+`workflow_call:` trigger, and `publish-python`, `publish-npm` and `publish-go`
+all gate on them with
 `uses: ./.github/workflows/test-<lang>.yml` rather than restating the matrix.
 Generating both sides is what makes this safe — the filename and job id are known
 to match. When a test workflow is not managed for a repo (excluded by
@@ -419,6 +420,7 @@ ci:
     npm_environment: npm                        # default: npm
     use_provenance: false                       # add --provenance to npm publish
     use_oidc: false                             # skip NPM_TOKEN (trusted publisher)
+    publish_requires_tests: true                # gate npm publish on test-npm.yml
   go:
     go_version: "1.25.10"                       # default: from go_toolchain.go, else "1.25"
     lint: golangci-lint                          # golangci-lint | none; default: golangci-lint

@@ -47,9 +47,14 @@ def _publish(tmp_path: Path, extra: str = "") -> dict:
 
 
 def test_publish_waits_on_test_matrix_by_default(tmp_path: Path) -> None:
+    """Publishing must not be able to race the tests.
+
+    The gate is now the generated test workflow rather than a copy of its
+    matrix, so assert the call exists and that publish depends on it.
+    """
     jobs = _publish(tmp_path)["jobs"]
-    assert "test-py-a" in jobs
-    assert "test-py-a" in jobs["publish-py-a"]["needs"]
+    assert jobs["tests"]["uses"] == "./.github/workflows/test-python.yml"
+    assert "tests" in jobs["publish-py-a"]["needs"]
 
 
 def test_publish_requires_tests_can_be_disabled(tmp_path: Path) -> None:
@@ -198,9 +203,24 @@ def test_ruff_pin_preserves_operator_form(tmp_path: Path) -> None:
     assert "pip install ruff>=0.16" in build_test_python(config, config.ci)
 
 
-def test_ruff_pin_reaches_inlined_publish_test_jobs(tmp_path: Path) -> None:
-    """The publish workflow inlines the test job; the pin must follow it there."""
-    parsed = _publish(
-        tmp_path, 'preferred_versions:\n  python:\n    "ruff": "0.16.0"\n'
+def test_ruff_pin_reaches_publish_gate_tests(tmp_path: Path) -> None:
+    """The pin must reach whichever test jobs gate the publish.
+
+    When the test workflow is managed, publish calls it and the pin lives there.
+    When it is not, publish inlines a copy and the pin has to follow it inline —
+    an unpinned linter turning a release red is the failure being prevented, so
+    both routes are checked.
+    """
+    pin = 'preferred_versions:\n  python:\n    "ruff": "0.16.0"\n'
+
+    for sub in ("called", "inlined"):
+        (tmp_path / sub).mkdir()
+
+    called = _publish(tmp_path / "called", pin)
+    assert called["jobs"]["tests"]["uses"] == "./.github/workflows/test-python.yml"
+
+    inlined = _publish(
+        tmp_path / "inlined", pin + "ci:\n  only_workflows: [publish-python]\n"
     )
-    assert "ruff==0.16.0" in yaml.dump(parsed)
+    assert "tests" not in inlined["jobs"]
+    assert "ruff==0.16.0" in yaml.dump(inlined)

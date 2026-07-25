@@ -139,7 +139,7 @@ def test_publish_python_topo_needs_chain(small_repo: Path) -> None:
     parsed = yaml.safe_load(text)
 
     jobs = parsed["jobs"]
-    gates = ["test-py-a", "test-py-b"]
+    gates = ["tests"]
     assert jobs["publish-py-a"]["needs"] == gates
     assert jobs["publish-py-b"]["needs"] == gates + ["publish-py-a"]
 

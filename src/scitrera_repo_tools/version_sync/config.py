@@ -117,6 +117,10 @@ class CiNpmConfig:
     npm_environment: str = "npm"
     use_provenance: bool = False
     use_oidc: bool = False
+    # Gate the publish on the same tests the test workflow runs. An npm publish
+    # is irrevocable in practice (unpublish is heavily restricted), so the
+    # default matches the python side rather than shipping untested code.
+    publish_requires_tests: bool = True
 
 
 @dataclass(frozen=True)
@@ -526,7 +530,14 @@ _CI_PYTHON_KEYS = (
     "publish_requires_tests",
     "verify_tag_version",
 )
-_CI_NPM_KEYS = ("node_version", "lint", "npm_environment", "use_provenance", "use_oidc")
+_CI_NPM_KEYS = (
+    "node_version",
+    "lint",
+    "npm_environment",
+    "use_provenance",
+    "use_oidc",
+    "publish_requires_tests",
+)
 _CI_GO_KEYS = (
     "go_version",
     "lint",
@@ -611,6 +622,10 @@ def _parse_ci_npm(raw: Any) -> CiNpmConfig:
         kwargs["use_provenance"] = _expect_bool(block, "use_provenance", "ci.npm", False)
     if "use_oidc" in block:
         kwargs["use_oidc"] = _expect_bool(block, "use_oidc", "ci.npm", False)
+    if "publish_requires_tests" in block:
+        kwargs["publish_requires_tests"] = _expect_bool(
+            block, "publish_requires_tests", "ci.npm", True
+        )
     return CiNpmConfig(**kwargs)
 
 

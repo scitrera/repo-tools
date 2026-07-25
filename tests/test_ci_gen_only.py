@@ -108,3 +108,37 @@ def test_allowlist_is_honored_under_check(tmp_path, write_file, write_json):
     # Only the allowlisted workflow is missing, so exactly one drives the exit.
     assert run(cfg, workflows_dir=out, force=False, check_only=True) == 1
     assert not out.exists() or sorted(p.name for p in out.glob("*.yml")) == []
+
+
+# ── publish gates reuse the generated test workflows ──────────────────────────
+
+def _publish_npm(tmp_path, write_file, write_json, ci_body: str):
+    import yaml
+    from scitrera_repo_tools.ci_gen_gha.templates import build_publish_npm
+    cfg = _cfg(tmp_path, write_file, write_json, ci_body)
+    return yaml.safe_load(build_publish_npm(cfg, cfg.ci))
+
+
+def test_npm_publish_gates_on_tests_by_default(tmp_path, write_file, write_json):
+    """npm unpublish is heavily restricted, so publishing untested code is final."""
+    doc = _publish_npm(tmp_path, write_file, write_json, "  test_branches: [main]\n")
+    assert doc["jobs"]["tests"]["uses"] == "./.github/workflows/test-npm.yml"
+    assert doc["jobs"]["publish-my-ts"]["needs"] == ["tests"]
+
+
+def test_npm_publish_gate_can_be_disabled(tmp_path, write_file, write_json):
+    doc = _publish_npm(
+        tmp_path, write_file, write_json,
+        "  npm:\n    publish_requires_tests: false\n",
+    )
+    assert "tests" not in doc["jobs"]
+    assert "needs" not in doc["jobs"]["publish-my-ts"]
+
+
+def test_npm_publish_inlines_when_test_npm_unmanaged(tmp_path, write_file, write_json):
+    doc = _publish_npm(
+        tmp_path, write_file, write_json, "  only_workflows: [publish-npm]\n"
+    )
+    assert "tests" not in doc["jobs"]
+    assert "test-my-ts" in doc["jobs"]
+    assert doc["jobs"]["publish-my-ts"]["needs"] == ["test-my-ts"]

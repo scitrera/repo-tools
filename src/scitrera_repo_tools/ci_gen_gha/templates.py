@@ -641,6 +641,7 @@ def build_publish_go(config: SyncConfig, ci: CiConfig) -> str:
     push = go.module_tags == "push"
     dirs_csv = " ".join(d for _, d, _ in nested)
     perms = "write" if push else "read"
+    verb = "Publish" if push else "Verify"
 
     if push:
         action_block = """            if [ -z "$have" ]; then
@@ -671,22 +672,14 @@ def build_publish_go(config: SyncConfig, ci: CiConfig) -> str:
           done
           [ "$bad" = 0 ]"""
 
-    needs_clause, test_job = _reusable_test_jobs(config, ci, "go")
+    parts: List[str] = []
+    gate_ids, test_jobs = _reusable_test_jobs(config, ci, "go")
+    if test_jobs:
+        parts.append(test_jobs)
+    needs_clause = f"    needs: [ {', '.join(gate_ids)} ]\n" if gate_ids else ""
 
-    return f"""{GENERATED_HEADER}
-name: Publish (Go)
-
-on:
-  push:
-    tags: [ 'v*.*.*' ]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-{test_job}  module-tags:
-    name: {"Publish" if push else "Verify"} Go module tags
+    parts.append(f"""  module-tags:
+    name: {verb} Go module tags
     runs-on: ubuntu-latest
 {needs_clause}    permissions:
       contents: {perms}
@@ -710,7 +703,22 @@ jobs:
             tag="$dir/$VERSION"
             have="$(git rev-list -n1 "$tag" 2>/dev/null || true)"
 {action_block}
-"""
+""")
+
+    jobs = "\n".join(parts)
+    return f"""{GENERATED_HEADER}
+name: Publish (Go)
+
+on:
+  push:
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+{jobs}"""
 
 
 def build_publish_python(config: SyncConfig, ci: CiConfig) -> str:
@@ -726,12 +734,10 @@ def build_publish_python(config: SyncConfig, ci: CiConfig) -> str:
     # than in a parallel workflow that a publish could race.
     gate_ids: List[str] = []
     if py.publish_requires_tests:
-        ruff_spec = _ruff_spec(config)
-        for p in _python_projects(config):
-            parts.append(
-                _python_test_job(p, _project_dir(config, "python", p), ci, ruff_spec)
-            )
-            gate_ids.append(f"test-{p}")
+        test_ids, test_jobs = _reusable_test_jobs(config, ci, "python")
+        if test_jobs:
+            parts.append(test_jobs)
+        gate_ids.extend(test_ids)
     if py.verify_tag_version is not None:
         parts.append(_python_verify_tag_job(py.verify_tag_version, ci))
         gate_ids.append("verify-tag")
@@ -780,10 +786,11 @@ def _npm_publish_job(
     project_dir: str,
     needs: Iterable[str],
     ci: CiConfig,
+    extra_needs: Iterable[str] = (),
 ) -> str:
     npm = ci.npm
     needs_clause = ""
-    needs_list = [f"publish-{n}" for n in needs]
+    needs_list = list(extra_needs) + [f"publish-{n}" for n in needs]
     if needs_list:
         needs_csv = ", ".join(needs_list)
         needs_clause = f"    needs: [ {needs_csv} ]\n"
@@ -840,15 +847,24 @@ def build_publish_npm(config: SyncConfig, ci: CiConfig) -> str:
     if not order:
         return ""
 
-    jobs = "\n".join(
-        _npm_publish_job(
-            node.name,
-            _project_dir(config, "typescript", node.name),
-            node.needs,
-            ci,
+    parts: List[str] = []
+    gate_ids: List[str] = []
+    if ci.npm.publish_requires_tests:
+        gate_ids, test_jobs = _reusable_test_jobs(config, ci, "npm")
+        if test_jobs:
+            parts.append(test_jobs)
+
+    for node in order:
+        parts.append(
+            _npm_publish_job(
+                node.name,
+                _project_dir(config, "typescript", node.name),
+                node.needs,
+                ci,
+                gate_ids,
+            )
         )
-        for node in order
-    )
+    jobs = "\n".join(parts)
 
     return f"""{GENERATED_HEADER}
 name: Publish (npm)
@@ -1240,7 +1256,7 @@ def _lang_projects(config: SyncConfig, lang: str) -> List[str]:
 
 
 def _reusable_test_jobs(config: SyncConfig, ci: CiConfig, lang: str) -> tuple:
-    """(needs_clause, job_yaml) for gating a release job on `lang`'s tests.
+    """(gate job ids, job yaml) for gating a release job on `lang`'s tests.
 
     Prefers `uses:` against the generated test workflow so the matrix is defined
     exactly once — we generate both sides, so the filename and job id are known
@@ -1250,15 +1266,12 @@ def _reusable_test_jobs(config: SyncConfig, ci: CiConfig, lang: str) -> tuple:
     """
     projects = _lang_projects(config, lang)
     if not projects:
-        return "", ""
+        return [], ""
     basename = _LANG_TEST_WORKFLOW[lang]
     if _workflow_is_managed(ci, basename):
-        return "    needs: [ tests ]\n", (
-            f"  tests:\n    uses: ./.github/workflows/{basename}.yml\n\n"
-        )
+        return ["tests"], f"  tests:\n    uses: ./.github/workflows/{basename}.yml\n"
     inline, ids = _inline_test_jobs(config, ci, prereqs=(lang,))
-    needs = "    needs: [ " + ", ".join(ids) + " ]\n"
-    return needs, inline + "\n"
+    return ids, inline
 
 
 def _inline_test_jobs(config: SyncConfig, ci: CiConfig, prereqs=None) -> tuple:
