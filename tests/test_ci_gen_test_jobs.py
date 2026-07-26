@@ -300,3 +300,84 @@ def test_npm_test_projects_rejects_unknown_project(tmp_path, write_file, write_j
     """Caught at config load, before the builder ever sees the name."""
     with pytest.raises(ConfigError, match="unknown project"):
         _ts(tmp_path, write_file, write_json, "  npm:\n    test_projects: [nope-ts]\n")
+
+
+# --- python in-repo dependency installs ------------------------------------
+
+PY_CHAIN_BODY = """\
+py-client: 0.1.0
+py-mid: 0.1.0
+py-leaf: 0.1.0
+
+project_rules:
+  py-client:
+    - {{ type: pyproject, path: client/pyproject.toml }}
+  py-mid:
+    - {{ type: pyproject, path: mid/pyproject.toml }}
+  py-leaf:
+    - {{ type: pyproject, path: leaf/pyproject.toml }}
+
+dependency_mappings:
+  python:
+    packages:
+      py-client: pyclient
+      py-mid: pymid
+    dependencies:
+      py-mid: [py-client]
+      py-leaf: [py-mid]
+
+ci:
+{ci_body}
+"""
+
+
+def _py_chain(tmp_path: Path, write_file, ci_body: str) -> dict:
+    for d in ("client", "mid", "leaf"):
+        write_file(tmp_path / d / "pyproject.toml",
+                   f'[project]\nname = "{d}"\nversion = "0.1.0"\n')
+    write_file(tmp_path / "versions.yaml", PY_CHAIN_BODY.format(ci_body=ci_body))
+    cfg = load_config(tmp_path / "versions.yaml")
+    return yaml.safe_load(build_test_python(cfg, cfg.ci))["jobs"]
+
+
+def test_local_deps_off_by_default(tmp_path, write_file):
+    jobs = _py_chain(tmp_path, write_file, "  test_branches: [main]\n")
+    for job in jobs.values():
+        assert not any(
+            "in-repo dependencies" in str(s.get("name", "")) for s in job["steps"]
+        )
+
+
+def test_local_deps_installs_siblings_from_checkout(tmp_path, write_file):
+    jobs = _py_chain(tmp_path, write_file, "  python:\n    install_local_deps: true\n")
+    step = _step(jobs["test-py-mid"], "Install in-repo dependencies (py-client)")
+    assert step["run"].strip() == "pip install -e client"
+    # Runs from the repo root, so the paths are the usual repo-relative dirs.
+    assert "working-directory" not in step
+
+
+def test_local_deps_are_transitive_and_ordered(tmp_path, write_file):
+    """A dependency must be installed before whatever requires it."""
+    jobs = _py_chain(tmp_path, write_file, "  python:\n    install_local_deps: true\n")
+    step = _step(jobs["test-py-leaf"], "Install in-repo dependencies (py-client, py-mid)")
+    lines = [ln.strip() for ln in step["run"].strip().splitlines()]
+    assert lines == ["pip install -e client", "pip install -e mid"]
+
+
+def test_local_deps_runs_before_project_install(tmp_path, write_file):
+    jobs = _py_chain(tmp_path, write_file, "  python:\n    install_local_deps: true\n")
+    names = [s.get("name") for s in jobs["test-py-mid"]["steps"]]
+    assert names.index("Install in-repo dependencies (py-client)") < names.index("Install")
+
+
+def test_local_deps_absent_for_project_with_no_siblings(tmp_path, write_file):
+    jobs = _py_chain(tmp_path, write_file, "  python:\n    install_local_deps: true\n")
+    assert not any(
+        "in-repo dependencies" in str(s.get("name", ""))
+        for s in jobs["test-py-client"]["steps"]
+    )
+
+
+def test_local_deps_rejects_non_bool(tmp_path, write_file):
+    with pytest.raises(ConfigError):
+        _py_chain(tmp_path, write_file, "  python:\n    install_local_deps: sure\n")

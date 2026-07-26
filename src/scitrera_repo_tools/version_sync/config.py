@@ -139,6 +139,19 @@ class CiPythonConfig:
     # and linting fail for different reasons and a repo may enforce only one.
     format_check: bool = False
     install: str = 'pip install -e ".[test]"'
+    # Install in-repo dependencies from the checkout before installing the
+    # project, instead of letting pip resolve them from PyPI.
+    #
+    # Without this a test job validates the working tree against the *published*
+    # copies of its siblings, so a bad release — or simply one that has not
+    # happened yet — fails a suite that has nothing wrong with it. The npm side
+    # never had this problem because `file:` specifiers already point at the
+    # sibling directory; this is the python equivalent.
+    #
+    # No artifact plumbing is needed, unlike the npm chain: a python package
+    # installs directly from source, so there is nothing to build and pass
+    # between jobs. Only the install order matters.
+    install_local_deps: bool = False
     test_command: str = "python -m pytest -v"
     setup_steps: tuple = ()                         # injected before lint/install
     extra_steps: tuple = ()                         # injected after the test step
@@ -634,6 +647,7 @@ _CI_PYTHON_KEYS = (
     "lint",
     "format_check",
     "install",
+    "install_local_deps",
     "test_command",
     "setup_steps",
     "extra_steps",
@@ -796,6 +810,10 @@ def _parse_ci_python(raw: Any, project_versions: Mapping[str, str]) -> CiPythonC
         kwargs["format_check"] = _expect_bool(block, "format_check", "ci.python", False)
     if "install" in block:
         kwargs["install"] = str(block["install"])
+    if "install_local_deps" in block:
+        kwargs["install_local_deps"] = _expect_bool(
+            block, "install_local_deps", "ci.python", False
+        )
     if "test_command" in block:
         kwargs["test_command"] = str(block["test_command"])
     if "setup_steps" in block:

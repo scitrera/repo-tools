@@ -232,11 +232,51 @@ def _python_project_cfg(ci: CiConfig, project: str):
     return ci.python.projects.get(project)
 
 
+def _python_dep_closure(config: SyncConfig) -> dict:
+    """Transitive in-repo python dependencies per project, in install order.
+
+    Deliberately NOT sorted, unlike the npm closure: the result is fed straight
+    to successive `pip install -e` calls, so a dependency has to appear before
+    anything that requires it. `publish_order` yields leaves first, and each
+    entry's own closure is already ordered, so appending preserves that.
+    """
+    order = publish_order(config, "python")
+    direct = {n.name: list(n.needs) for n in order}
+    closure: dict = {}
+    for node in order:
+        acc: List[str] = []
+        for dep in direct[node.name]:
+            for name in closure.get(dep, []) + [dep]:
+                if name not in acc:
+                    acc.append(name)
+        closure[node.name] = acc
+    return closure
+
+
+def _python_local_dep_step(deps: Iterable[tuple], indent: str = "      ") -> str:
+    """Editable-install the project's in-repo dependencies from the checkout.
+
+    One step rather than one per dependency: the ordering is the only thing that
+    matters and a single block keeps it visible. Runs from the repo root, so the
+    paths are the same repo-relative directories used everywhere else.
+    """
+    deps = list(deps)
+    if not deps:
+        return ""
+    lines = "".join(f"{indent}    pip install -e {d}\n" for _, d in deps)
+    names = ", ".join(name for name, _ in deps)
+    return f"""
+{indent}- name: Install in-repo dependencies ({names})
+{indent}  run: |
+{lines}"""
+
+
 def _python_test_job(
     project: str,
     project_dir: str,
     ci: CiConfig,
     ruff_spec: str = "ruff",
+    local_deps: Iterable[tuple] = (),
 ) -> str:
     py = ci.python
     over = _python_project_cfg(ci, project)
@@ -264,6 +304,7 @@ def _python_test_job(
 
     setup_block = _render_steps(setup_steps, project_dir)
     extra_block = _render_steps(extra_steps, project_dir)
+    local_dep_block = _python_local_dep_step(local_deps)
 
     return f"""  test-{project}:
     name: Test {project} (py${{{{ matrix.python-version }}}})
@@ -278,7 +319,7 @@ def _python_test_job(
       - uses: {SETUP_PYTHON}
         with:
           python-version: ${{{{ matrix.python-version }}}}
-{setup_block}{lint_step}
+{setup_block}{lint_step}{local_dep_block}
       - name: Install
         run: {install}
         working-directory: {project_dir}
@@ -297,8 +338,17 @@ def build_test_python(config: SyncConfig, ci: CiConfig) -> str:
     branches_csv = ", ".join(ci.test_branches)
     push_csv = ", ".join(_push_branches(ci))
     ruff_spec = _ruff_spec(config)
+    closure = _python_dep_closure(config) if ci.python.install_local_deps else {}
     jobs = "\n".join(
-        _python_test_job(p, _project_dir(config, "python", p), ci, ruff_spec)
+        _python_test_job(
+            p,
+            _project_dir(config, "python", p),
+            ci,
+            ruff_spec,
+            local_deps=[
+                (d, _project_dir(config, "python", d)) for d in closure.get(p, ())
+            ],
+        )
         for p in projects
     )
 
@@ -1673,9 +1723,19 @@ def _inline_test_jobs(config: SyncConfig, ci: CiConfig, prereqs=None) -> tuple:
 
     if "python" in test_prereqs:
         ruff_spec = _ruff_spec(config)
+        closure = _python_dep_closure(config) if ci.python.install_local_deps else {}
         for p in _python_test_projects(config, ci):
             parts.append(
-                _python_test_job(p, _project_dir(config, "python", p), ci, ruff_spec)
+                _python_test_job(
+                    p,
+                    _project_dir(config, "python", p),
+                    ci,
+                    ruff_spec,
+                    local_deps=[
+                        (d, _project_dir(config, "python", d))
+                        for d in closure.get(p, ())
+                    ],
+                )
             )
             ids.append(f"test-{p}")
     if "npm" in test_prereqs:

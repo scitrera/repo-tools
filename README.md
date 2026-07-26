@@ -475,6 +475,39 @@ ci:
 This is an escape hatch, not a workflow authoring surface: a step is a name and
 a shell command, optionally with `if` and `working_directory`.
 
+### Python packages that depend on each other
+
+By default a python test job installs its in-repo siblings the same way any
+outside consumer would: from PyPI. That means the job validates the working
+tree against the *published* copy of its own sibling, so a bad release — or one
+that simply has not happened yet — fails a suite that has nothing wrong with
+it, and genuine drift between two packages in the same commit goes unnoticed.
+
+`ci.python.install_local_deps` installs them from the checkout first, in
+topological order, before installing the project:
+
+```yaml
+ci:
+  python:
+    install_local_deps: true
+```
+
+```yaml
+      - name: Install in-repo dependencies (my-client)
+        run: |
+          pip install -e my-client
+
+      - name: Install
+        run: pip install -e ".[dev]"
+        working-directory: my-langchain
+```
+
+Edges come from `dependency_mappings.python.dependencies`, the same graph that
+orders the publish jobs. Unlike the npm chain this needs no job ordering and no
+artifacts — a python package installs directly from source, so only the install
+order matters — and the editable install satisfies the exact `==` pin that
+`sync-versions` keeps in the manifest.
+
 ### TypeScript packages that depend on each other
 
 `npm ci` does not build a `file:` dependency — npm runs `prepare` for those, not
@@ -601,6 +634,7 @@ ci:
     lint: ruff                                  # ruff | none; default: ruff
     format_check: false                         # also run `ruff format --check`
     install: 'pip install -e ".[test]"'         # default
+    install_local_deps: false                   # install in-repo siblings from the checkout
     test_command: 'python -m pytest -v'         # default
     setup_steps: []                             # injected before lint/install
     extra_steps: []                             # injected after the test step
