@@ -148,6 +148,12 @@ class CiPythonConfig:
     pypi_environment: str = "pypi"
     publish_requires_tests: bool = True
     verify_tag_version: Optional[str] = None        # project name, or None to disable
+    # Projects to generate test jobs for. Empty means every python project.
+    # Distinct from publish_projects: a package can be worth publishing but not
+    # yet testable in CI (a suite that needs credentials, or one blocked on a
+    # dependency), and shipping a job that is known to be red trains people to
+    # ignore a red build.
+    test_projects: tuple = ()
     # Projects to generate publish jobs for. Empty means every python project.
     # A manifest is not a statement of intent to publish: a repo can hold a
     # package that ships only as a container image, and generating a PyPI job
@@ -179,7 +185,11 @@ class CiNpmConfig:
     # is irrevocable in practice (unpublish is heavily restricted), so the
     # default matches the python side rather than shipping untested code.
     publish_requires_tests: bool = True
-    # See CiPythonConfig for the rationale behind both of these.
+    # See CiPythonConfig for the rationale behind these.
+    # `test_projects` differs on the npm side: a project the allowlist omits is
+    # still included when something in the allowlist depends on it, because its
+    # build output is what makes the dependent testable at all.
+    test_projects: tuple = ()
     publish_projects: tuple = ()
     skip_if_published: bool = False
 
@@ -628,6 +638,7 @@ _CI_PYTHON_KEYS = (
     "setup_steps",
     "extra_steps",
     "projects",
+    "test_projects",
     "pypi_environment",
     "publish_requires_tests",
     "verify_tag_version",
@@ -643,6 +654,7 @@ _CI_NPM_KEYS = (
     "use_provenance",
     "use_oidc",
     "publish_requires_tests",
+    "test_projects",
     "publish_projects",
     "skip_if_published",
 )
@@ -810,6 +822,10 @@ def _parse_ci_python(raw: Any, project_versions: Mapping[str, str]) -> CiPythonC
                 "project in versions.yaml"
             )
         kwargs["verify_tag_version"] = project
+    if "test_projects" in block:
+        kwargs["test_projects"] = _parse_publish_projects(
+            block["test_projects"], project_versions, "ci.python.test_projects"
+        )
     if "publish_projects" in block:
         kwargs["publish_projects"] = _parse_publish_projects(
             block["publish_projects"], project_versions, "ci.python.publish_projects"
@@ -850,6 +866,10 @@ def _parse_ci_npm(raw: Any, project_versions: Mapping[str, str]) -> CiNpmConfig:
     if "publish_requires_tests" in block:
         kwargs["publish_requires_tests"] = _expect_bool(
             block, "publish_requires_tests", "ci.npm", True
+        )
+    if "test_projects" in block:
+        kwargs["test_projects"] = _parse_publish_projects(
+            block["test_projects"], project_versions, "ci.npm.test_projects"
         )
     if "publish_projects" in block:
         kwargs["publish_projects"] = _parse_publish_projects(

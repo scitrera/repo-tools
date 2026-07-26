@@ -270,3 +270,33 @@ def test_npm_chain_job_graph_is_closed(tmp_path, write_file, write_json):
     for name, job in jobs.items():
         for dep in job.get("needs", []):
             assert dep in jobs, f"job '{name}' needs undefined job '{dep}'"
+
+
+def test_npm_test_projects_scopes_jobs(tmp_path, write_file, write_json):
+    """ts-ui has no edges, so omitting it simply drops its job."""
+    jobs = _ts(tmp_path, write_file, write_json,
+               "  npm:\n    build: true\n    test_projects: [ts-sdk, ts-mcp, ts-plugin]\n")
+    assert "test-ts-ui" not in jobs
+    assert set(jobs) == {"test-ts-sdk", "test-ts-mcp", "test-ts-plugin"}
+
+
+def test_npm_test_projects_pulls_in_required_dependencies(tmp_path, write_file, write_json):
+    """Omitting a dependency of a kept project would break the kept project."""
+    jobs = _ts(tmp_path, write_file, write_json,
+               "  npm:\n    build: true\n    test_projects: [ts-plugin]\n")
+    assert set(jobs) == {"test-ts-sdk", "test-ts-mcp", "test-ts-plugin"}
+    for name, job in jobs.items():
+        for dep in job.get("needs", []):
+            assert dep in jobs, f"job '{name}' needs undefined job '{dep}'"
+
+
+def test_npm_test_projects_without_build_still_scopes(tmp_path, write_file, write_json):
+    jobs = _ts(tmp_path, write_file, write_json,
+               "  npm:\n    test_projects: [ts-sdk]\n")
+    assert set(jobs) == {"test-ts-sdk"}
+
+
+def test_npm_test_projects_rejects_unknown_project(tmp_path, write_file, write_json):
+    """Caught at config load, before the builder ever sees the name."""
+    with pytest.raises(ConfigError, match="unknown project"):
+        _ts(tmp_path, write_file, write_json, "  npm:\n    test_projects: [nope-ts]\n")

@@ -137,6 +137,22 @@ def _python_projects(config: SyncConfig) -> List[str]:
     return sorted(manifests_for_language(config, "python").keys())
 
 
+def _python_test_projects(config: SyncConfig, ci: CiConfig) -> List[str]:
+    """Python projects that get a test job, honoring `ci.python.test_projects`."""
+    projects = _python_projects(config)
+    allow = ci.python.test_projects
+    if not allow:
+        return projects
+    unknown = sorted(set(allow) - set(projects))
+    if unknown:
+        raise ValueError(
+            f"ci.python.test_projects names {unknown}, which "
+            f"{'is' if len(unknown) == 1 else 'are'} not python project(s); "
+            f"expected one of {projects}"
+        )
+    return [p for p in projects if p in set(allow)]
+
+
 def _npm_projects(config: SyncConfig) -> List[str]:
     return sorted(manifests_for_language(config, "typescript").keys())
 
@@ -274,7 +290,7 @@ def _python_test_job(
 
 
 def build_test_python(config: SyncConfig, ci: CiConfig) -> str:
-    projects = _python_projects(config)
+    projects = _python_test_projects(config, ci)
     if not projects:
         return ""
 
@@ -649,6 +665,26 @@ def build_test_npm(config: SyncConfig, ci: CiConfig) -> str:
         sequence = [node.name for node in order]
     else:
         sequence = projects
+
+    # An omitted project is pulled back in when something kept depends on it:
+    # without its build output the dependent cannot be tested at all, so
+    # excluding it would silently break the job it was meant to leave alone.
+    allow = ci.npm.test_projects
+    if allow:
+        unknown = sorted(set(allow) - set(projects))
+        if unknown:
+            raise ValueError(
+                f"ci.npm.test_projects names {unknown}, which "
+                f"{'is' if len(unknown) == 1 else 'are'} not typescript "
+                f"project(s); expected one of {projects}"
+            )
+        required = set(allow)
+        for name in allow:
+            required.update(closure.get(name, ()))
+        sequence = [p for p in sequence if p in required]
+        depended_on = {
+            dep for p in sequence for dep in closure.get(p, ()) if dep in required
+        }
 
     jobs = "\n".join(
         _npm_test_job(
@@ -1604,7 +1640,7 @@ def _workflow_is_managed(ci: CiConfig, basename: str) -> bool:
 
 def _lang_projects(config: SyncConfig, lang: str) -> List[str]:
     if lang == "python":
-        return _python_projects(config)
+        return _python_test_projects(config, config.ci)
     if lang == "npm":
         return _npm_projects(config)
     return _go_projects(config)
@@ -1637,7 +1673,7 @@ def _inline_test_jobs(config: SyncConfig, ci: CiConfig, prereqs=None) -> tuple:
 
     if "python" in test_prereqs:
         ruff_spec = _ruff_spec(config)
-        for p in _python_projects(config):
+        for p in _python_test_projects(config, ci):
             parts.append(
                 _python_test_job(p, _project_dir(config, "python", p), ci, ruff_spec)
             )

@@ -500,6 +500,13 @@ The publish workflows assume one `v*.*.*` tag drives every artifact. That holds
 when a repo versions its packages in lockstep, and breaks in two ways when it
 does not.
 
+`test_projects` and `publish_projects` are independent allowlists. A package
+can be worth publishing without being testable in CI yet — a suite blocked on
+credentials, or on a broken published dependency — and shipping a job that is
+known to be red trains people to ignore a red build. On the npm side a project
+the allowlist omits is pulled back in when something kept depends on it, since
+its build output is what makes the dependent testable at all.
+
 `publish_projects` is an allowlist of projects to generate publish jobs for.
 A manifest is not a declaration of intent to publish — a repo can hold a package
 that ships only as a container image, or a UI that never goes to npm — and the
@@ -598,6 +605,7 @@ ci:
     setup_steps: []                             # injected before lint/install
     extra_steps: []                             # injected after the test step
     projects: {}                                # per-project overrides, keyed by project name
+    test_projects: []                           # projects to test; default [] = every python project
     pypi_environment: pypi                      # GitHub environment, default: pypi
     publish_requires_tests: true                # gate PyPI upload on the test matrix; default: true
     verify_tag_version: null                    # project name; fail if tag != its versions.yaml version
@@ -608,6 +616,7 @@ ci:
     lint: tsc-noemit                            # tsc-noemit | eslint | none
     build: false                                # run `npm run build` in test jobs
     cache: false                                # setup-node npm caching (needs a lockfile)
+    test_projects: []                           # projects to test; deps of kept projects are pulled back in
     npm_environment: npm                        # default: npm
     use_provenance: false                       # add --provenance to npm publish
     use_oidc: false                             # skip NPM_TOKEN (trusted publisher)

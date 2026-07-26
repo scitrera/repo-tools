@@ -185,3 +185,39 @@ def test_skip_if_published_rejects_non_bool(tmp_path, write_file, write_json):
     with pytest.raises(ConfigError):
         _cfg(tmp_path, write_file, write_json,
              "  npm:\n    skip_if_published: yes-please\n")
+
+
+# --- test_projects ---------------------------------------------------------
+
+
+def test_test_projects_scopes_the_test_workflow(tmp_path, write_file, write_json):
+    from scitrera_repo_tools.ci_gen_gha.templates import build_test_python
+
+    cfg = _cfg(tmp_path, write_file, write_json,
+               "  python:\n    test_projects: [py-lib]\n")
+    jobs = yaml.safe_load(build_test_python(cfg, cfg.ci))["jobs"]
+    assert set(jobs) == {"test-py-lib"}
+
+
+def test_test_projects_is_independent_of_publish_projects(tmp_path, write_file, write_json):
+    """A package can be publishable without being testable in CI yet."""
+    from scitrera_repo_tools.ci_gen_gha.templates import build_test_python
+
+    cfg = _cfg(tmp_path, write_file, write_json,
+               "  python:\n    test_projects: [py-lib]\n    publish_projects: [py-lib, py-app]\n")
+    tested = set(yaml.safe_load(build_test_python(cfg, cfg.ci))["jobs"])
+    published = {
+        j for j in yaml.safe_load(build_publish_python(cfg, cfg.ci))["jobs"]
+        if j.startswith("publish-")
+    }
+    assert tested == {"test-py-lib"}
+    assert published == {"publish-py-lib", "publish-py-app"}
+
+
+def test_test_projects_rejects_wrong_language(tmp_path, write_file, write_json):
+    from scitrera_repo_tools.ci_gen_gha.templates import build_test_python
+
+    cfg = _cfg(tmp_path, write_file, write_json,
+               "  python:\n    test_projects: [ts-lib]\n")
+    with pytest.raises(ValueError, match="not python project"):
+        build_test_python(cfg, cfg.ci)
