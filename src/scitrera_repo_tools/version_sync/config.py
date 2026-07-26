@@ -91,6 +91,38 @@ class GoToolchainConfig:
 
 
 @dataclass(frozen=True)
+class CiStep:
+    """One caller-supplied step injected into a generated test job.
+
+    Deliberately narrow: a name and a shell command. Generated workflows are
+    meant to be regenerated, so this is an escape hatch for the one or two
+    repo-specific things a template cannot know about — freeing disk before a
+    heavy test run, or a regression gate that is not a test — not a general
+    workflow authoring surface.
+    """
+    name: str
+    run: str
+    if_expr: Optional[str] = None            # YAML key is `if`
+    working_directory: Optional[str] = None  # None = the project's own directory
+
+
+@dataclass(frozen=True)
+class CiPythonProject:
+    """Per-project overrides for one python project's test job.
+
+    Exists because a monorepo's packages rarely share one install line: a server
+    needs its optional extras to import at all, while a thin SDK needs none of
+    them. A single global `install` forces the union on every project, which
+    installs unrelated heavy dependencies and hides which package actually
+    requires what.
+    """
+    install: Optional[str] = None
+    test_command: Optional[str] = None
+    setup_steps: tuple = ()
+    extra_steps: tuple = ()
+
+
+@dataclass(frozen=True)
 class CiPythonConfig:
     """Per-language CI knobs for python flows.
 
@@ -103,7 +135,16 @@ class CiPythonConfig:
     """
     test_versions: tuple = ("3.11", "3.12", "3.13")
     lint: str = "ruff"                              # "ruff" | "none"
+    # Also run `ruff format --check`. Separate from `lint` because formatting
+    # and linting fail for different reasons and a repo may enforce only one.
+    format_check: bool = False
     install: str = 'pip install -e ".[test]"'
+    test_command: str = "python -m pytest -v"
+    setup_steps: tuple = ()                         # injected before lint/install
+    extra_steps: tuple = ()                         # injected after the test step
+    # Per-project overrides, keyed by project name. Anything unset falls back to
+    # the language-level value above.
+    projects: Mapping[str, CiPythonProject] = field(default_factory=dict)
     pypi_environment: str = "pypi"
     publish_requires_tests: bool = True
     verify_tag_version: Optional[str] = None        # project name, or None to disable
@@ -123,6 +164,14 @@ class CiNpmConfig:
     """Per-language CI knobs for npm/typescript flows."""
     node_version: str = "24"
     lint: str = "tsc-noemit"                        # "tsc-noemit" | "eslint" | "none"
+    # Run `npm run build --if-present` in test jobs. Required when packages
+    # reference each other with `file:` specifiers: the consumer type-checks
+    # against the producer's built output, and npm does not run `prepublishOnly`
+    # for a `file:` dependency, so nothing else creates that output.
+    build: bool = False
+    # Enable actions/setup-node dependency caching. Off by default because it
+    # requires a lockfile at the resolved path and fails the job without one.
+    cache: bool = False
     npm_environment: str = "npm"
     use_provenance: bool = False
     use_oidc: bool = False
@@ -573,7 +622,12 @@ _CI_KEYS = (
 _CI_PYTHON_KEYS = (
     "test_versions",
     "lint",
+    "format_check",
     "install",
+    "test_command",
+    "setup_steps",
+    "extra_steps",
+    "projects",
     "pypi_environment",
     "publish_requires_tests",
     "verify_tag_version",
@@ -583,6 +637,8 @@ _CI_PYTHON_KEYS = (
 _CI_NPM_KEYS = (
     "node_version",
     "lint",
+    "build",
+    "cache",
     "npm_environment",
     "use_provenance",
     "use_oidc",
@@ -642,6 +698,69 @@ def _parse_publish_projects(
     return names
 
 
+_CI_STEP_KEYS = ("name", "run", "if", "working_directory")
+_CI_PYTHON_PROJECT_KEYS = ("install", "test_command", "setup_steps", "extra_steps")
+
+
+def _parse_ci_steps(raw: Any, where: str) -> tuple:
+    """Parse a list of injected steps."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ConfigError(f"{where}: expected list of steps")
+    steps: List[CiStep] = []
+    for idx, entry in enumerate(raw):
+        at = f"{where}[{idx}]"
+        block = _expect_mapping(entry, at)
+        _reject_unknown(block, _CI_STEP_KEYS, at)
+        name = block.get("name")
+        run = block.get("run")
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError(f"{at}.name: required non-empty string")
+        if not isinstance(run, str) or not run.strip():
+            raise ConfigError(f"{at}.run: required non-empty shell command")
+        if_expr = block.get("if")
+        wd = block.get("working_directory")
+        if if_expr is not None and not isinstance(if_expr, str):
+            raise ConfigError(f"{at}.if: expected string expression")
+        if wd is not None and (not isinstance(wd, str) or not wd.strip()):
+            raise ConfigError(f"{at}.working_directory: expected non-empty string")
+        steps.append(
+            CiStep(
+                name=name.strip(),
+                run=run.rstrip("\n"),
+                if_expr=if_expr,
+                working_directory=wd.strip() if isinstance(wd, str) else None,
+            )
+        )
+    return tuple(steps)
+
+
+def _parse_ci_python_projects(
+    raw: Any,
+    project_versions: Mapping[str, str],
+    where: str,
+) -> Dict[str, CiPythonProject]:
+    block = _expect_mapping(raw, where)
+    out: Dict[str, CiPythonProject] = {}
+    for name, entry in block.items():
+        project = str(name)
+        at = f"{where}.{project}"
+        if project not in project_versions:
+            raise ConfigError(
+                f"{at}: unknown project; expected one of {sorted(project_versions)}"
+            )
+        sub = _expect_mapping(entry, at)
+        _reject_unknown(sub, _CI_PYTHON_PROJECT_KEYS, at)
+        out[project] = CiPythonProject(
+            install=str(sub["install"]) if "install" in sub else None,
+            test_command=str(sub["test_command"]) if "test_command" in sub else None,
+            setup_steps=_parse_ci_steps(sub.get("setup_steps"), f"{at}.setup_steps"),
+            extra_steps=_parse_ci_steps(sub.get("extra_steps"), f"{at}.extra_steps"),
+        )
+    return out
+
+
 def _parse_ci_python(raw: Any, project_versions: Mapping[str, str]) -> CiPythonConfig:
     if raw is None:
         return CiPythonConfig()
@@ -661,8 +780,24 @@ def _parse_ci_python(raw: Any, project_versions: Mapping[str, str]) -> CiPythonC
                 f"ci.python.lint: expected one of {sorted(_CI_PYTHON_LINT_CHOICES)}, got '{lint}'"
             )
         kwargs["lint"] = lint
+    if "format_check" in block:
+        kwargs["format_check"] = _expect_bool(block, "format_check", "ci.python", False)
     if "install" in block:
         kwargs["install"] = str(block["install"])
+    if "test_command" in block:
+        kwargs["test_command"] = str(block["test_command"])
+    if "setup_steps" in block:
+        kwargs["setup_steps"] = _parse_ci_steps(
+            block["setup_steps"], "ci.python.setup_steps"
+        )
+    if "extra_steps" in block:
+        kwargs["extra_steps"] = _parse_ci_steps(
+            block["extra_steps"], "ci.python.extra_steps"
+        )
+    if "projects" in block:
+        kwargs["projects"] = _parse_ci_python_projects(
+            block["projects"], project_versions, "ci.python.projects"
+        )
     if "pypi_environment" in block:
         kwargs["pypi_environment"] = str(block["pypi_environment"])
     if "publish_requires_tests" in block:
@@ -702,6 +837,10 @@ def _parse_ci_npm(raw: Any, project_versions: Mapping[str, str]) -> CiNpmConfig:
                 f"ci.npm.lint: expected one of {sorted(_CI_NPM_LINT_CHOICES)}, got '{lint}'"
             )
         kwargs["lint"] = lint
+    if "build" in block:
+        kwargs["build"] = _expect_bool(block, "build", "ci.npm", False)
+    if "cache" in block:
+        kwargs["cache"] = _expect_bool(block, "cache", "ci.npm", False)
     if "npm_environment" in block:
         kwargs["npm_environment"] = str(block["npm_environment"])
     if "use_provenance" in block:
@@ -1241,6 +1380,8 @@ __all__ = [
     "DependencyMappings",
     "SourcesConfig",
     "GoToolchainConfig",
+    "CiStep",
+    "CiPythonProject",
     "CiPythonConfig",
     "CiNpmConfig",
     "GovulncheckIgnore",

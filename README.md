@@ -434,6 +434,66 @@ not revocable once it reaches PyPI. Two further gates are opt-in:
 disagrees with `versions.yaml`, and `ci.github_release` attaches the
 built distributions to a GitHub release.
 
+### Tailoring the generated test jobs
+
+The defaults assume every package of a language installs and tests the same way.
+Where that does not hold, `ci.python.projects` overrides `install` and
+`test_command` per project; anything unset falls back to the language-level
+value. A single global install line otherwise forces the union of every
+package's extras onto all of them:
+
+```yaml
+ci:
+  python:
+    install: 'pip install -e ".[dev]"'
+    test_command: 'pytest tests/ -x'
+    projects:
+      my-server:
+        install: 'pip install -e ".[dev,context,observability]"'
+        test_command: 'pytest tests/ -m "not slow and not integration" -x'
+```
+
+`setup_steps` (before lint/install) and `extra_steps` (after the tests) inject
+repo-specific steps that no template can know about — freeing disk before a
+heavy run, or a regression gate that is not a test. Both exist at the language
+level and per project, and both default `working_directory` to the project's own
+directory:
+
+```yaml
+ci:
+  python:
+    setup_steps:
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc
+    projects:
+      my-server:
+        extra_steps:
+          - name: Retrieval eval gate
+            run: my-eval gate
+```
+
+This is an escape hatch, not a workflow authoring surface: a step is a name and
+a shell command, optionally with `if` and `working_directory`.
+
+### TypeScript packages that depend on each other
+
+`npm ci` does not build a `file:` dependency — npm runs `prepare` for those, not
+`prepublishOnly` — so a package that type-checks against a sibling's `dist/`
+fails in a test job that builds nothing. Setting `ci.npm.build: true` turns on
+`npm run build` and, when `dependency_mappings.typescript.dependencies` declares
+edges, chains the test jobs along them: each job waits on its transitive
+dependencies, downloads their build output, and uploads its own if anything
+depends on it.
+
+```yaml
+ci:
+  npm:
+    build: true
+```
+
+With `build` off the jobs stay independent and the output is unchanged, so this
+costs nothing for repos whose packages do not reference each other.
+
 ### Independently-versioned packages
 
 The publish workflows assume one `v*.*.*` tag drives every artifact. That holds
@@ -532,7 +592,12 @@ ci:
   python:
     test_versions: ["3.11", "3.12", "3.13"]   # default
     lint: ruff                                  # ruff | none; default: ruff
+    format_check: false                         # also run `ruff format --check`
     install: 'pip install -e ".[test]"'         # default
+    test_command: 'python -m pytest -v'         # default
+    setup_steps: []                             # injected before lint/install
+    extra_steps: []                             # injected after the test step
+    projects: {}                                # per-project overrides, keyed by project name
     pypi_environment: pypi                      # GitHub environment, default: pypi
     publish_requires_tests: true                # gate PyPI upload on the test matrix; default: true
     verify_tag_version: null                    # project name; fail if tag != its versions.yaml version
@@ -541,6 +606,8 @@ ci:
   npm:
     node_version: "24"                          # default: "24"
     lint: tsc-noemit                            # tsc-noemit | eslint | none
+    build: false                                # run `npm run build` in test jobs
+    cache: false                                # setup-node npm caching (needs a lockfile)
     npm_environment: npm                        # default: npm
     use_provenance: false                       # add --provenance to npm publish
     use_oidc: false                             # skip NPM_TOKEN (trusted publisher)

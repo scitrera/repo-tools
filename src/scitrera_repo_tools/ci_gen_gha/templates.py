@@ -186,6 +186,36 @@ jobs:
 """
 
 
+def _render_steps(steps, default_dir: str, indent: str = "      ") -> str:
+    """Render caller-supplied steps as a YAML block.
+
+    Returns "" or a block that both starts and ends with a newline, matching the
+    convention the surrounding job templates use for optional sections. Multi-line
+    `run` bodies are emitted as a literal block scalar with every line carried to
+    `indent + 4`; a line left short of that dedents out of the scalar and
+    corrupts the file rather than failing visibly.
+    """
+    if not steps:
+        return ""
+    parts: List[str] = []
+    for step in steps:
+        wd = step.working_directory if step.working_directory is not None else default_dir
+        block = f"{indent}- name: {step.name}\n"
+        if step.if_expr:
+            block += f"{indent}  if: {step.if_expr}\n"
+        block += f"{indent}  run: |\n"
+        for line in step.run.split("\n"):
+            block += f"{indent}    {line}\n" if line.strip() else "\n"
+        block += f"{indent}  working-directory: {wd}\n"
+        parts.append(block)
+    return "\n" + "\n".join(parts)
+
+
+def _python_project_cfg(ci: CiConfig, project: str):
+    """Per-project override record, or None when the project has no entry."""
+    return ci.python.projects.get(project)
+
+
 def _python_test_job(
     project: str,
     project_dir: str,
@@ -193,17 +223,31 @@ def _python_test_job(
     ruff_spec: str = "ruff",
 ) -> str:
     py = ci.python
+    over = _python_project_cfg(ci, project)
+    install = over.install if over is not None and over.install is not None else py.install
+    test_command = (
+        over.test_command
+        if over is not None and over.test_command is not None
+        else py.test_command
+    )
+    setup_steps = tuple(py.setup_steps) + tuple(over.setup_steps if over else ())
+    extra_steps = tuple(py.extra_steps) + tuple(over.extra_steps if over else ())
+
     matrix = ", ".join(f'"{v}"' for v in py.test_versions)
     lint_step = ""
     if py.lint == "ruff":
+        format_line = "\n          ruff format --check ." if py.format_check else ""
         lint_step = f"""\
 
       - name: Lint with ruff
         run: |
           pip install {ruff_spec}
-          ruff check .
+          ruff check .{format_line}
         working-directory: {project_dir}
 """
+
+    setup_block = _render_steps(setup_steps, project_dir)
+    extra_block = _render_steps(extra_steps, project_dir)
 
     return f"""  test-{project}:
     name: Test {project} (py${{{{ matrix.python-version }}}})
@@ -218,15 +262,15 @@ def _python_test_job(
       - uses: {SETUP_PYTHON}
         with:
           python-version: ${{{{ matrix.python-version }}}}
-{lint_step}
+{setup_block}{lint_step}
       - name: Install
-        run: {py.install}
+        run: {install}
         working-directory: {project_dir}
 
       - name: Run tests
-        run: python -m pytest -v
+        run: {test_command}
         working-directory: {project_dir}
-"""
+{extra_block}"""
 
 
 def build_test_python(config: SyncConfig, ci: CiConfig) -> str:
@@ -269,7 +313,37 @@ jobs:
 {jobs}"""
 
 
-def _npm_test_job(project: str, project_dir: str, ci: CiConfig) -> str:
+def _npm_dep_closure(order) -> dict:
+    """Transitive in-repo dependencies per project, from a leaves-first order.
+
+    The closure rather than the direct edges: a package two hops down the chain
+    still resolves the top package's `file:` specifier through its own
+    dependency, so that build output has to be present too.
+    """
+    direct = {n.name: list(n.needs) for n in order}
+    closure: dict = {}
+    for node in order:
+        acc: List[str] = []
+        for dep in direct[node.name]:
+            for name in closure.get(dep, []) + [dep]:
+                if name not in acc:
+                    acc.append(name)
+        closure[node.name] = sorted(acc)
+    return closure
+
+
+def _npm_dist_artifact(project: str) -> str:
+    return f"ts-dist-{project}"
+
+
+def _npm_test_job(
+    project: str,
+    project_dir: str,
+    ci: CiConfig,
+    needs: Iterable[str] = (),
+    download: Iterable[tuple] = (),
+    upload: bool = False,
+) -> str:
     npm = ci.npm
     lint_step = ""
     if npm.lint == "tsc-noemit":
@@ -287,24 +361,68 @@ def _npm_test_job(project: str, project_dir: str, ci: CiConfig) -> str:
         working-directory: {project_dir}
 """
 
+    cache_with = ""
+    if npm.cache:
+        cache_with = f"""
+          cache: 'npm'
+          cache-dependency-path: {project_dir}/package-lock.json"""
+
+    build_step = ""
+    if npm.build:
+        build_step = f"""
+      - name: Build
+        run: npm run build --if-present
+        working-directory: {project_dir}
+"""
+
+    needs_clause = ""
+    needs_list = [f"test-{n}" for n in needs]
+    if needs_list:
+        needs_clause = f"    needs: [ {', '.join(needs_list)} ]\n"
+
+    # Downloaded before `npm ci`: npm may copy rather than symlink a `file:`
+    # dependency, in which case build output that arrives afterwards never
+    # reaches node_modules.
+    download_steps = ""
+    for dep, dep_dir in download:
+        download_steps += f"""
+      - name: Download {dep} build output
+        uses: {DOWNLOAD_ARTIFACT}
+        with:
+          name: {_npm_dist_artifact(dep)}
+          path: {dep_dir}/dist/
+"""
+
+    upload_step = ""
+    if upload:
+        upload_step = f"""
+      - name: Upload build output
+        uses: {UPLOAD_ARTIFACT}
+        with:
+          name: {_npm_dist_artifact(project)}
+          path: {project_dir}/dist/
+          if-no-files-found: error
+          retention-days: 1
+"""
+
     return f"""  test-{project}:
     name: Test {project}
     runs-on: ubuntu-latest
-    steps:
+{needs_clause}    steps:
       - uses: {CHECKOUT}
 
       - uses: {SETUP_NODE}
         with:
-          node-version: '{npm.node_version}'
-
+          node-version: '{npm.node_version}'{cache_with}
+{download_steps}
       - name: Install
         run: npm ci
         working-directory: {project_dir}
-{lint_step}
+{build_step}{lint_step}
       - name: Run tests
         run: npm test --if-present
         working-directory: {project_dir}
-"""
+{upload_step}"""
 
 
 def _go_test_job(project: str, project_dir: str, go_version: str, ci: CiConfig) -> str:
@@ -516,8 +634,32 @@ def build_test_npm(config: SyncConfig, ci: CiConfig) -> str:
 
     branches_csv = ", ".join(ci.test_branches)
     push_csv = ", ".join(_push_branches(ci))
+    dirs = {p: _project_dir(config, "typescript", p) for p in projects}
+
+    # Threading build output between test jobs only makes sense when there is a
+    # dependency graph to thread it along AND something builds. With `build`
+    # off nothing produces a dist/, so the jobs stay independent and the output
+    # is byte-identical to before this feature existed.
+    order = publish_order(config, "typescript") if ci.npm.build else []
+    closure = _npm_dep_closure(order) if order else {}
+    depended_on = {dep for deps in closure.values() for dep in deps}
+
+    if closure:
+        # Toposorted so a job is always defined before the jobs that need it.
+        sequence = [node.name for node in order]
+    else:
+        sequence = projects
+
     jobs = "\n".join(
-        _npm_test_job(p, _project_dir(config, "typescript", p), ci) for p in projects
+        _npm_test_job(
+            p,
+            dirs[p],
+            ci,
+            needs=closure.get(p, ()),
+            download=[(d, dirs[d]) for d in closure.get(p, ())],
+            upload=p in depended_on,
+        )
+        for p in sequence
     )
 
     return f"""{GENERATED_HEADER}
