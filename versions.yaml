@@ -2,7 +2,7 @@
 # Run: sync-versions             to apply
 # Run: sync-versions --check     to verify (CI-friendly)
 
-scitrera-repo-tools: 0.1.19
+scitrera-repo-tools: 0.1.20
 
 # Pin external runtime + dev dependencies for security & consistency.
 # Literal value form (`>=6.0`, `>=7.0`) is preserved verbatim per the
