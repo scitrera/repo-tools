@@ -434,6 +434,43 @@ not revocable once it reaches PyPI. Two further gates are opt-in:
 disagrees with `versions.yaml`, and `ci.github_release` attaches the
 built distributions to a GitHub release.
 
+### Independently-versioned packages
+
+The publish workflows assume one `v*.*.*` tag drives every artifact. That holds
+when a repo versions its packages in lockstep, and breaks in two ways when it
+does not.
+
+`publish_projects` is an allowlist of projects to generate publish jobs for.
+A manifest is not a declaration of intent to publish — a repo can hold a package
+that ships only as a container image, or a UI that never goes to npm — and the
+default of "publish everything with a manifest" would make a public release of
+it. Excluding a project also removes it from its dependents' `needs`, since an
+unpublished project imposes no ordering constraint:
+
+```yaml
+ci:
+  python:
+    publish_projects: [ my-sdk, my-server ]   # my-embed-server ships as an image only
+  npm:
+    publish_projects: [ my-sdk-ts, my-mcp ]   # my-explorer is not an npm package
+```
+
+`skip_if_published` handles the other case: a package whose version did not
+move since the last tag. PyPI and npm both reject re-uploading an existing
+version, so without this the whole release job fails. The guard queries the
+registry and skips only the upload — the build and any artifact upload still
+run, so a skipped package still contributes to the GitHub release.
+
+```yaml
+ci:
+  npm:
+    skip_if_published: true
+```
+
+`skip_if_published` on the python side needs a static `version` in
+`pyproject.toml`; a dynamic version fails the job with an explicit message
+rather than guessing.
+
 ### Bootstrapping repo-tools inside generated workflows
 
 Generated workflows need `sync-versions` on the runner. By default they
@@ -499,6 +536,8 @@ ci:
     pypi_environment: pypi                      # GitHub environment, default: pypi
     publish_requires_tests: true                # gate PyPI upload on the test matrix; default: true
     verify_tag_version: null                    # project name; fail if tag != its versions.yaml version
+    publish_projects: []                        # projects to publish; default [] = every python project
+    skip_if_published: false                    # skip upload when PyPI already serves this version
   npm:
     node_version: "24"                          # default: "24"
     lint: tsc-noemit                            # tsc-noemit | eslint | none
@@ -506,6 +545,8 @@ ci:
     use_provenance: false                       # add --provenance to npm publish
     use_oidc: false                             # skip NPM_TOKEN (trusted publisher)
     publish_requires_tests: true                # gate npm publish on test-npm.yml
+    publish_projects: []                        # projects to publish; default [] = every TS project
+    skip_if_published: false                    # skip publish when npm already serves this version
   go:
     go_version: "1.25.10"                       # default: from go_toolchain.go, else "1.25"
     lint: golangci-lint                          # golangci-lint | none; default: golangci-lint

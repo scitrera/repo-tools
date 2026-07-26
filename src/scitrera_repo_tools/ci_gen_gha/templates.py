@@ -16,7 +16,7 @@ from ..compile_protos.tools import resolve_ts_package_dir
 from ..version_sync.config import CiConfig, SyncConfig
 from ..version_sync.discovery import manifests_for_language
 from ..version_sync.normalize import normalize_python
-from .topology import docker_order, publish_order
+from .topology import PublishNode, docker_order, publish_order
 
 # Pinned action versions — bumped explicitly, not picked up via floating tag.
 CHECKOUT = "actions/checkout@v6"
@@ -547,6 +547,83 @@ jobs:
 {jobs}"""
 
 
+def _filtered_publish_order(config: SyncConfig, lang: str, allow: tuple, where: str):
+    """`publish_order` restricted to `allow`, with dangling `needs` dropped.
+
+    An excluded project must also disappear from its dependents' `needs`, or the
+    workflow references a job that was never rendered and GitHub rejects it
+    outright. Dropping the edge is correct rather than merely convenient: an
+    unpublished project imposes no ordering constraint on the registry.
+    """
+    order = publish_order(config, lang)
+    if not allow:
+        return order
+
+    known = {node.name for node in order}
+    unknown = sorted(set(allow) - known)
+    if unknown:
+        raise ValueError(
+            f"{where} names {unknown}, which {'is' if len(unknown) == 1 else 'are'} "
+            f"not {lang} project(s); expected one of {sorted(known)}"
+        )
+
+    keep = set(allow)
+    return [
+        PublishNode(name=n.name, needs=tuple(d for d in n.needs if d in keep))
+        for n in order
+        if n.name in keep
+    ]
+
+
+def _npm_published_guard(project_dir: str, indent: str = "      ") -> str:
+    """Step that records whether this exact version is already on npm."""
+    return f"""{indent}- name: Check whether this version is already published
+{indent}  id: published
+{indent}  working-directory: {project_dir}
+{indent}  run: |
+{indent}    set -euo pipefail
+{indent}    name=$(node -p "require('./package.json').name")
+{indent}    version=$(node -p "require('./package.json').version")
+{indent}    if npm view "$name@$version" version >/dev/null 2>&1; then
+{indent}      echo "skip=true" >> "$GITHUB_OUTPUT"
+{indent}      echo "::notice::$name@$version is already on npm; skipping publish"
+{indent}    else
+{indent}      echo "skip=false" >> "$GITHUB_OUTPUT"
+{indent}    fi
+"""
+
+
+def _pypi_published_guard(project_dir: str, indent: str = "      ") -> str:
+    """Step that records whether this exact version is already on PyPI.
+
+    Both `python -c` calls are one-liners on purpose: a multi-line script inside
+    a `run: |` block has to carry the block's indentation, and getting that wrong
+    silently dedents out of the scalar and corrupts the whole workflow file.
+    """
+    read_field = (
+        "python -c \"import tomllib;print(tomllib.load("
+        "open('pyproject.toml','rb'))['project'].get('%s',''))\""
+    )
+    return f"""{indent}- name: Check whether this version is already published
+{indent}  id: published
+{indent}  working-directory: {project_dir}
+{indent}  run: |
+{indent}    set -euo pipefail
+{indent}    name=$({read_field % "name"})
+{indent}    version=$({read_field % "version"})
+{indent}    if [ -z "$version" ]; then
+{indent}      echo "::error::pyproject.toml declares no static version (dynamic?); ci.python.skip_if_published cannot determine what to look up"
+{indent}      exit 1
+{indent}    fi
+{indent}    if curl -sfL -o /dev/null "https://pypi.org/pypi/$name/$version/json"; then
+{indent}      echo "skip=true" >> "$GITHUB_OUTPUT"
+{indent}      echo "::notice::$name $version is already on PyPI; skipping publish"
+{indent}    else
+{indent}      echo "skip=false" >> "$GITHUB_OUTPUT"
+{indent}    fi
+"""
+
+
 def _python_verify_tag_job(project: str, ci: CiConfig) -> str:
     """Gate the upload on tag ↔ versions.yaml agreement.
 
@@ -604,6 +681,15 @@ def _python_publish_job(
           if-no-files-found: error
 """
 
+    # The guard deliberately gates only the upload. Building and archiving still
+    # run, so a skipped publish still contributes its artifact to the GitHub
+    # release and the release is not silently missing a package.
+    guard_step = ""
+    publish_if = ""
+    if py.skip_if_published:
+        guard_step = "\n" + _pypi_published_guard(project_dir)
+        publish_if = "        if: steps.published.outputs.skip != 'true'\n"
+
     return f"""  publish-{project}:
     name: Publish {project} to PyPI
     runs-on: ubuntu-latest
@@ -624,9 +710,9 @@ def _python_publish_job(
           pip install build
           python -m build
         working-directory: {project_dir}
-
+{guard_step}
       - name: Publish to PyPI (trusted publisher)
-        uses: {PYPI_PUBLISH}
+{publish_if}        uses: {PYPI_PUBLISH}
         with:
           packages-dir: {project_dir}/dist/
 {upload_step}"""
@@ -816,11 +902,13 @@ jobs:
 
 
 def build_publish_python(config: SyncConfig, ci: CiConfig) -> str:
-    order = publish_order(config, "python")
+    py = ci.python
+    order = _filtered_publish_order(
+        config, "python", py.publish_projects, "ci.python.publish_projects"
+    )
     if not order:
         return ""
 
-    py = ci.python
     parts: List[str] = []
 
     # Gates that every publish job depends on. A tag push is not revocable once
@@ -921,6 +1009,13 @@ def _npm_publish_job(
         else "      contents: read"
     )
 
+    # Runs after the build so the version it reads is the one about to ship.
+    guard_step = ""
+    publish_if = ""
+    if npm.skip_if_published:
+        guard_step = "\n" + _npm_published_guard(project_dir)
+        publish_if = "        if: steps.published.outputs.skip != 'true'\n"
+
     return f"""  publish-{project}:
     name: Publish {project} to npm
     runs-on: ubuntu-latest
@@ -947,15 +1042,17 @@ def _npm_publish_job(
       - name: Build
         run: npm run build --if-present
         working-directory: {project_dir}
-
+{guard_step}
       - name: Publish to npm
-        run: npm publish {publish_args}
+{publish_if}        run: npm publish {publish_args}
         working-directory: {project_dir}
 {auth_env}"""
 
 
 def build_publish_npm(config: SyncConfig, ci: CiConfig) -> str:
-    order = publish_order(config, "typescript")
+    order = _filtered_publish_order(
+        config, "typescript", ci.npm.publish_projects, "ci.npm.publish_projects"
+    )
     if not order:
         return ""
 
