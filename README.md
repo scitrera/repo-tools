@@ -678,8 +678,42 @@ ci:
 ```
 
 If a language has no `project_rules` entries (no `type: pyproject` /
-`type: package` / `type: gomod_require` rules), its workflows are simply
-not generated.
+`type: package` / `type: gomod` / `type: gomod_require` rules), its workflows
+are simply not generated.
+
+**Declaring a Go module (`type: gomod`).** Python and TypeScript answer "which
+directory is this project?" for free — `pyproject.toml` and `package.json` are
+both the file a version is written into and the root of the thing CI builds. Go
+has no version manifest at all (a module's version is a git tag), so discovery
+historically fell back to the project's first `gomod_require` rule. That rule
+exists to pin *other* modules' require lines, and the two come apart badly:
+
+- a module with no in-repo requires has no `gomod_require` rule, so nothing
+  identifies it and CI never sees it;
+- a project whose only `gomod_require` targets a **nested** module points its
+  entire Go lane at the wrong directory — `go test` runs against the wrong
+  module, and `publish-go` reconciles a tag nobody resolves against.
+
+`type: gomod` declares the module outright and rewrites nothing. It takes
+precedence over `gomod_require` regardless of declaration order:
+
+```yaml
+project_rules:
+  my-sdk-go:
+    - { type: gomod,         path: sdk-go/go.mod }      # what CI operates on
+    - { type: go_version,    path: sdk-go/doc.go }
+    # pins the parent's version inside the nested module's require line
+    - { type: gomod_require, path: sdk-go/aether/go.mod, args: [ example.com/repo/sdk-go ] }
+
+  # A second module in the same tree gets its own entry. No version key: it is a
+  # declaration for CI, so `sync-versions` skips it while `test-go`/`publish-go`
+  # still cover it.
+  my-sdk-go-aether:
+    - { type: gomod, path: sdk-go/aether/go.mod }
+```
+
+Existing repos need no change — with no `gomod` rule the old `gomod_require`
+fallback still applies.
 
 **Pinning the linter.** When `preferred_versions.python` declares a `ruff`
 entry, the generated lint step installs that exact spec

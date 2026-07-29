@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Callable, Dict
 
 from .go_version import update_go_version
+from .gomod import declare_gomod
 from .gomod_require import update_gomod_require
 from .init_py import update_init_py
 from .marketplace_json import update_marketplace
@@ -19,6 +20,7 @@ STRATEGY_MAP: Dict[str, Callable] = {
     "plugin": update_plugin,
     "marketplace": update_marketplace,
     "go_version": update_go_version,
+    "gomod": declare_gomod,
     "gomod_require": update_gomod_require,
 }
 
