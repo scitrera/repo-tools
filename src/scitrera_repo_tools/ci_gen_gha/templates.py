@@ -306,6 +306,14 @@ def _python_test_job(
     extra_block = _render_steps(extra_steps, project_dir)
     local_dep_block = _python_local_dep_step(local_deps)
 
+    # Emitted before `setup_steps` so an injected step may itself use uvx.
+    uv_block = ""
+    if py.install_uv:
+        uv_block = f"""
+      - name: Install uv
+        uses: {SETUP_UV}
+"""
+
     return f"""  test-{project}:
     name: Test {project} (py${{{{ matrix.python-version }}}})
     runs-on: ubuntu-latest
@@ -319,7 +327,7 @@ def _python_test_job(
       - uses: {SETUP_PYTHON}
         with:
           python-version: ${{{{ matrix.python-version }}}}
-{setup_block}{lint_step}{local_dep_block}
+{uv_block}{setup_block}{lint_step}{local_dep_block}
       - name: Install
         run: {install}
         working-directory: {project_dir}
@@ -482,7 +490,13 @@ def _npm_test_job(
           node-version: '{npm.node_version}'{cache_with}
 {download_steps}
       - name: Install
-        run: npm ci
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "::notice::No package-lock.json; using 'npm install'. Commit a lockfile for reproducible installs."
+            npm install
+          fi
         working-directory: {project_dir}
 {build_step}{lint_step}
       - name: Run tests

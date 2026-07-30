@@ -381,3 +381,58 @@ def test_local_deps_absent_for_project_with_no_siblings(tmp_path, write_file):
 def test_local_deps_rejects_non_bool(tmp_path, write_file):
     with pytest.raises(ConfigError):
         _py_chain(tmp_path, write_file, "  python:\n    install_local_deps: sure\n")
+
+
+# --- uv availability in test jobs -------------------------------------------
+
+
+def test_python_test_job_installs_uv_by_default(tmp_path, write_file):
+    """A suite that shells out to `uvx` must not pass locally and fail in CI.
+
+    Developer machines have uv installed as a matter of course, so the absence
+    of this step surfaces only in CI — where it reads as a fault in the change
+    under review rather than in the environment.
+    """
+    jobs = _py(tmp_path, write_file, "  python:\n    test_versions: ['3.12']\n")
+    for name, job in jobs.items():
+        uses = [s.get("uses", "") for s in job["steps"]]
+        assert any(u.startswith("astral-sh/setup-uv@") for u in uses), "%s has no uv step" % name
+
+
+def test_python_test_job_uv_step_precedes_injected_setup_steps(tmp_path, write_file):
+    """An injected setup step may itself invoke uvx, so uv must come first."""
+    jobs = _py(tmp_path, write_file, """\
+  python:
+    test_versions: ['3.12']
+    setup_steps:
+      - name: Custom
+        run: uvx some-tool --version
+""")
+    steps = jobs["test-py-sdk"]["steps"]
+    uv_idx = next(i for i, s in enumerate(steps) if s.get("uses", "").startswith("astral-sh/setup-uv@"))
+    custom_idx = next(i for i, s in enumerate(steps) if s.get("name") == "Custom")
+    assert uv_idx < custom_idx
+
+
+def test_python_test_job_uv_can_be_disabled(tmp_path, write_file):
+    """Opt-out for a project that must prove it runs without uv present."""
+    jobs = _py(tmp_path, write_file, "  python:\n    test_versions: ['3.12']\n    install_uv: false\n")
+    for job in jobs.values():
+        uses = [s.get("uses", "") for s in job["steps"]]
+        assert not any(u.startswith("astral-sh/setup-uv@") for u in uses)
+
+
+# --- npm install without a committed lockfile -------------------------------
+
+
+def test_npm_install_falls_back_when_no_lockfile(tmp_path, write_file, write_json):
+    """`npm ci` hard-fails without a lockfile; a repo may legitimately lack one.
+
+    sparkrun-openclaw-plugin gitignores package-lock.json, so `npm ci` could
+    never succeed in CI no matter how correct the code was.
+    """
+    jobs = _ts(tmp_path, write_file, write_json, "  npm:\n    node_version: '22'\n")
+    run = _step(jobs["test-ts-sdk"], "Install")["run"]
+    assert "npm ci" in run, "a lockfile, when present, must still get a reproducible install"
+    assert "npm install" in run, "must fall back when no lockfile is committed"
+    assert "package-lock.json" in run, "the fallback must key off the lockfile's presence"

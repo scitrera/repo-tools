@@ -139,6 +139,13 @@ class CiPythonConfig:
     # and linting fail for different reasons and a repo may enforce only one.
     format_check: bool = False
     install: str = 'pip install -e ".[test]"'
+    # Put `uv`/`uvx` on PATH in the test job. On by default because a suite
+    # that shells out to `uvx` — or exercises code that does — otherwise
+    # passes on every developer machine, where uv is installed as a matter of
+    # course, and fails only in CI. That asymmetry is expensive: the failure
+    # reads as a problem with the change under review rather than with the
+    # environment. Set False for a project that must prove it runs without uv.
+    install_uv: bool = True
     # Install in-repo dependencies from the checkout before installing the
     # project, instead of letting pip resolve them from PyPI.
     #
@@ -648,6 +655,7 @@ _CI_PYTHON_KEYS = (
     "format_check",
     "install",
     "install_local_deps",
+    "install_uv",
     "test_command",
     "setup_steps",
     "extra_steps",
@@ -814,6 +822,8 @@ def _parse_ci_python(raw: Any, project_versions: Mapping[str, str]) -> CiPythonC
         kwargs["install_local_deps"] = _expect_bool(
             block, "install_local_deps", "ci.python", False
         )
+    if "install_uv" in block:
+        kwargs["install_uv"] = _expect_bool(block, "install_uv", "ci.python", True)
     if "test_command" in block:
         kwargs["test_command"] = str(block["test_command"])
     if "setup_steps" in block:
