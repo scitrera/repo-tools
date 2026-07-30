@@ -436,3 +436,22 @@ def test_npm_install_falls_back_when_no_lockfile(tmp_path, write_file, write_jso
     assert "npm ci" in run, "a lockfile, when present, must still get a reproducible install"
     assert "npm install" in run, "must fall back when no lockfile is committed"
     assert "package-lock.json" in run, "the fallback must key off the lockfile's presence"
+
+
+def test_every_npm_install_site_tolerates_a_missing_lockfile():
+    """All three install sites must share the fallback, not just the test job.
+
+    The first pass fixed only `_npm_test_job`, so sparkrun's PR went green
+    while the *publish* workflow still hard-failed on `npm ci` — discovered
+    only when the release tag was pushed. Asserting on the template source
+    keeps the three sites (test, publish, proto) from drifting apart again.
+    """
+    import inspect
+
+    from scitrera_repo_tools.ci_gen_gha import templates
+
+    src = inspect.getsource(templates)
+    # No site may emit a bare `run: npm ci`; each must go through the shared
+    # constant that falls back to `npm install`.
+    assert "run: npm ci" not in src, "a bare `npm ci` install site remains"
+    assert src.count("{NPM_INSTALL_RUN}") == 3, "expected test, publish and proto to share the helper"

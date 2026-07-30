@@ -34,6 +34,20 @@ UPLOAD_ARTIFACT = "actions/upload-artifact@v7"
 DOWNLOAD_ARTIFACT = "actions/download-artifact@v8"
 GH_RELEASE = "softprops/action-gh-release@v3"
 SETUP_UV = "astral-sh/setup-uv@v9.0.0"
+
+#: `npm ci` requires a committed package-lock.json and hard-fails without one.
+#: A repo can legitimately not commit a lockfile, and that repo should still get
+#: a workflow that runs — so prefer the reproducible install and fall back only
+#: when there is nothing to reproduce from. Shared by every install site
+#: (test, publish, proto) so the three cannot drift apart again.
+NPM_INSTALL_RUN = """run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "::notice::No package-lock.json; using 'npm install'. Commit a lockfile for reproducible installs."
+            npm install
+          fi"""
+
 SETUP_PROTOC = "arduino/setup-protoc@v3"
 
 # Python used for jobs that need an interpreter of their own (building sdists,
@@ -490,13 +504,7 @@ def _npm_test_job(
           node-version: '{npm.node_version}'{cache_with}
 {download_steps}
       - name: Install
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            echo "::notice::No package-lock.json; using 'npm install'. Commit a lockfile for reproducible installs."
-            npm install
-          fi
+        {NPM_INSTALL_RUN}
         working-directory: {project_dir}
 {build_step}{lint_step}
       - name: Run tests
@@ -1278,7 +1286,7 @@ def _npm_publish_job(
         run: {_rt(ci, "sync-versions --release")}
 
       - name: Install dependencies
-        run: npm ci
+        {NPM_INSTALL_RUN}
         working-directory: {project_dir}
 
       - name: Build
@@ -1959,7 +1967,7 @@ def _proto_typescript_job(config: SyncConfig, ci: CiConfig) -> str:
           node-version: '{ci.npm.node_version}'
 
       - name: Install TypeScript proto tooling
-        run: npm ci
+        {NPM_INSTALL_RUN}
         working-directory: {workdir}
 
 {_bootstrap_steps(ci)}

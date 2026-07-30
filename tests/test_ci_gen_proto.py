@@ -121,9 +121,11 @@ def test_python_job_targets_the_interpreter_holding_grpcio_tools(tmp_path, write
 def test_typescript_job_runs_npm_ci_in_the_package_dir(tmp_path, write_file):
     doc = _yaml(_render(tmp_path, write_file))
     steps = doc["jobs"]["proto-check-typescript"]["steps"]
-    npm = [s for s in steps if s.get("run") == "npm ci"]
+    npm = [s for s in steps if "npm ci" in (s.get("run") or "")]
     assert len(npm) == 1
     assert npm[0]["working-directory"] == "sdk/ts"
+    # Reproducible when a lockfile exists, still runnable when one does not.
+    assert "npm install" in npm[0]["run"]
 
 
 def test_typescript_package_dir_discovered_when_omitted(tmp_path, write_file, write_json):
@@ -132,7 +134,7 @@ def test_typescript_package_dir_discovered_when_omitted(tmp_path, write_file, wr
     (tmp_path / "sdk/ts/src/proto").mkdir(parents=True)
     doc = _yaml(_render(tmp_path, write_file, body))
     steps = doc["jobs"]["proto-check-typescript"]["steps"]
-    npm = [s for s in steps if s.get("run") == "npm ci"]
+    npm = [s for s in steps if "npm ci" in (s.get("run") or "")]
     assert npm[0]["working-directory"] == "sdk/ts"
 
 
