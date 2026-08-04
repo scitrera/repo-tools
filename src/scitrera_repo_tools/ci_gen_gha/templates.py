@@ -1045,21 +1045,261 @@ def _go_module_tag_problems(modules: List[tuple]) -> List[str]:
     return problems
 
 
-def build_publish_go(config: SyncConfig, ci: CiConfig) -> str:
-    """Reconcile per-module Go tags for a release.
+def _resolve_binary_project(binary, go_projects: List[str]) -> str:
+    """Which Go module a binary descriptor builds from.
 
-    Go has no publish step: a version exists once `<dir>/vX.Y.Z` points at a
-    commit. So this workflow gates on the tests and then makes those tags true,
-    driven by the single root tag the release already uses.
+    Optional only while the repo has exactly one module. With several, a guess
+    would build the wrong module and still produce a plausible-looking asset.
+    """
+    if binary.project is not None:
+        if binary.project not in go_projects:
+            raise ValueError(
+                f"ci.go.binaries['{binary.name}'].project: '{binary.project}' is not a "
+                f"Go project; expected one of {go_projects}"
+            )
+        return binary.project
+    if len(go_projects) == 1:
+        return go_projects[0]
+    raise ValueError(
+        f"ci.go.binaries['{binary.name}'].project is required: this repo declares "
+        f"{len(go_projects)} Go modules ({go_projects}), so which one to build "
+        "cannot be inferred."
+    )
+
+
+def _go_binary_matrix(ci: CiConfig, binary) -> str:
+    """`strategy.matrix.include` lines for one binary's platform list."""
+    platforms = binary.platforms or ci.go.binary_platforms
+    lines = []
+    for platform in platforms:
+        goos, _, goarch = platform.partition("/")
+        lines.append(f"          - {{ goos: {goos}, goarch: {goarch} }}")
+    return "\n".join(lines)
+
+
+def _go_binary_pack_block(binary) -> str:
+    """The archive step for one binary, as shell.
+
+    `auto` has to branch at run time because the packing format follows GOOS,
+    which is a matrix value rather than a generation-time constant.
+    """
+    tar_cmd = 'tar -czf "$dist/$base.tar.gz" -C "$stage" .'
+    zip_cmd = '(cd "$stage" && zip -qr "$dist/$base.zip" .)'
+    if binary.archive == "tar.gz":
+        return f"          {tar_cmd}"
+    if binary.archive == "zip":
+        return f"          {zip_cmd}"
+    if binary.archive == "none":
+        return (
+            '          if [ "$GOOS" = windows ]; then\n'
+            '            mv "$stage/$bin" "$dist/$base.exe"\n'
+            "          else\n"
+            '            mv "$stage/$bin" "$dist/$base"\n'
+            "          fi"
+        )
+    return (
+        '          case "$GOOS" in\n'
+        f"            windows) {zip_cmd} ;;\n"
+        f"            *) {tar_cmd} ;;\n"
+        "          esac"
+    )
+
+
+def _go_binary_build_job(
+    binary,
+    project_dir: str,
+    go_version: str,
+    ci: CiConfig,
+    needs: List[str],
+) -> str:
+    """Cross-compile one command across its platform matrix.
+
+    Every leg runs on ubuntu-latest: with CGO off, `go build` cross-compiles to
+    every target without a foreign toolchain, so a per-OS runner would cost
+    queue time and buy nothing. A binary that genuinely needs cgo must set
+    `env: { CGO_ENABLED: "1" }` and will need a runner that can link for it —
+    which this generator does not provide.
+    """
+    needs_clause = f"    needs: [ {', '.join(needs)} ]\n" if needs else ""
+    # CGO_ENABLED first so an explicit env entry can override it.
+    env_pairs = {"CGO_ENABLED": "0"}
+    env_pairs.update(binary.env)
+    env_lines = "".join(
+        f"          {k}: '{v}'\n" for k, v in sorted(env_pairs.items())
+    )
+    ldflags_arg = f' -ldflags "{binary.ldflags}"' if binary.ldflags else ""
+    copies = "".join(
+        f'          cp "$GITHUB_WORKSPACE/{f}" "$stage/"\n'
+        for f in binary.extra_files
+    ) if binary.archive != "none" else ""
+
+    return f"""  build-{binary.name}:
+    name: Build {binary.name} (${{{{ matrix.goos }}}}/${{{{ matrix.goarch }}}})
+    runs-on: ubuntu-latest
+{needs_clause}    strategy:
+      # One unsupported target must not withhold the assets for every other
+      # platform; the release job needs what did build.
+      fail-fast: false
+      matrix:
+        include:
+{_go_binary_matrix(ci, binary)}
+    steps:
+      - uses: {CHECKOUT}
+
+      - uses: {SETUP_GO}
+        with:
+          go-version: '{go_version}'
+          cache-dependency-path: {project_dir}/go.sum
+
+      - name: Build
+        working-directory: {project_dir}
+        env:
+{env_lines}          GOOS: ${{{{ matrix.goos }}}}
+          GOARCH: ${{{{ matrix.goarch }}}}
+        run: |
+          set -euo pipefail
+          # A dispatch run has no tag to read a version from, and must still
+          # produce something identifiable rather than an asset called "".
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            VERSION="${{GITHUB_REF_NAME#v}}"
+          else
+            VERSION="0.0.0-dev.${{GITHUB_SHA:0:7}}"
+          fi
+          COMMIT="$GITHUB_SHA"
+          bin="{binary.name}"
+          if [ "$GOOS" = windows ]; then bin="$bin.exe"; fi
+          stage="$RUNNER_TEMP/stage-{binary.name}"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          go build -trimpath{ldflags_arg} -o "$stage/$bin" {binary.package}
+{copies}          dist="$GITHUB_WORKSPACE/dist"
+          mkdir -p "$dist"
+          base="{binary.name}_${{VERSION}}_${{GOOS}}_${{GOARCH}}"
+{_go_binary_pack_block(binary)}
+          ls -l "$dist"
+
+      - name: Upload {binary.name} (${{{{ matrix.goos }}}}/${{{{ matrix.goarch }}}})
+        uses: {UPLOAD_ARTIFACT}
+        with:
+          name: binaries-{binary.name}-${{{{ matrix.goos }}}}-${{{{ matrix.goarch }}}}
+          path: dist/
+          # An empty upload here would surface as a release that is simply
+          # missing a platform, which nobody notices until someone downloads it.
+          if-no-files-found: error
+"""
+
+
+def _go_binaries_release_job(build_job_ids: List[str]) -> str:
+    needs_csv = ", ".join(build_job_ids)
+    return f"""  github-release:
+    name: Attach binaries to GitHub release
+    runs-on: ubuntu-latest
+    needs: [ {needs_csv} ]
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    steps:
+      - name: Download built binaries
+        uses: {DOWNLOAD_ARTIFACT}
+        with:
+          pattern: binaries-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          # Written outside dist/ first: `sha256sum * > dist/checksums.txt`
+          # truncates the file before the glob expands, so it would list itself.
+          (cd dist && sha256sum *) > checksums.txt
+          mv checksums.txt dist/
+          cat dist/checksums.txt
+
+      - name: Create GitHub release
+        uses: {GH_RELEASE}
+        with:
+          files: dist/*
+          generate_release_notes: true
+"""
+
+
+def build_publish_go(config: SyncConfig, ci: CiConfig) -> str:
+    """Everything a Go repo publishes on a release tag.
+
+    Two independent halves, either of which can be the only one present:
+
+    - Module tags. Go has no publish step — a version exists once
+      `<dir>/vX.Y.Z` points at a commit — so this makes those tags true,
+      driven by the single root tag the release already uses.
+    - Release binaries. Cross-compiled per `ci.go.binaries` and attached to
+      the GitHub release, for the repos whose artifact is a command rather
+      than (or as well as) an importable module.
     """
     go = ci.go
-    if go.module_tags == "none":
-        return ""
     modules = _go_modules(config)
     nested = [m for m in modules if m[1] != "."]
-    if not nested:
+    want_tags = go.module_tags != "none" and bool(nested)
+    if not want_tags and not go.binaries:
         return ""
 
+    parts: List[str] = []
+    gate_ids, test_jobs = _reusable_test_jobs(config, ci, "go")
+    if test_jobs:
+        parts.append(test_jobs)
+
+    if want_tags:
+        parts.append(_go_module_tags_job(config, ci, nested, modules, gate_ids))
+
+    if go.binaries:
+        go_projects = _go_projects(config)
+        if not go_projects:
+            raise ValueError(
+                "ci.go.binaries is configured but no Go project is declared; add a "
+                "'{ type: gomod, path: <dir>/go.mod }' rule under project_rules."
+            )
+        go_version = _go_version(config)
+        build_ids: List[str] = []
+        for binary in go.binaries:
+            project = _resolve_binary_project(binary, go_projects)
+            parts.append(
+                _go_binary_build_job(
+                    binary,
+                    _project_dir(config, "go", project),
+                    go_version,
+                    ci,
+                    gate_ids,
+                )
+            )
+            build_ids.append(f"build-{binary.name}")
+        # Gated on the same switch as the python side: whether this repo cuts
+        # GitHub releases at all is one decision, not one per language.
+        if ci.github_release:
+            parts.append(_go_binaries_release_job(build_ids))
+
+    jobs = "\n".join(parts)
+    return f"""{GENERATED_HEADER}
+name: Publish (Go)
+
+on:
+  push:
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+{jobs}"""
+
+
+def _go_module_tags_job(
+    config: SyncConfig,
+    ci: CiConfig,
+    nested: List[tuple],
+    modules: List[tuple],
+    gate_ids: List[str],
+) -> str:
+    go = ci.go
     problems = _go_module_tag_problems(modules)
     if problems:
         raise ValueError(
@@ -1102,13 +1342,9 @@ def build_publish_go(config: SyncConfig, ci: CiConfig) -> str:
           done
           [ "$bad" = 0 ]"""
 
-    parts: List[str] = []
-    gate_ids, test_jobs = _reusable_test_jobs(config, ci, "go")
-    if test_jobs:
-        parts.append(test_jobs)
     needs_clause = f"    needs: [ {', '.join(gate_ids)} ]\n" if gate_ids else ""
 
-    parts.append(f"""  module-tags:
+    return f"""  module-tags:
     name: {verb} Go module tags
     runs-on: ubuntu-latest
 {needs_clause}    permissions:
@@ -1133,22 +1369,7 @@ def build_publish_go(config: SyncConfig, ci: CiConfig) -> str:
             tag="$dir/$VERSION"
             have="$(git rev-list -n1 "$tag" 2>/dev/null || true)"
 {action_block}
-""")
-
-    jobs = "\n".join(parts)
-    return f"""{GENERATED_HEADER}
-name: Publish (Go)
-
-on:
-  push:
-    tags: [ 'v*.*.*' ]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-{jobs}"""
+"""
 
 
 def build_publish_python(config: SyncConfig, ci: CiConfig) -> str:

@@ -232,6 +232,52 @@ class GovulncheckIgnore:
         return not self.projects or project in self.projects
 
 
+#: Platforms a `ci.go.binaries` entry is cross-compiled for when it names none.
+#: Deliberately the full desktop/server matrix rather than a minimal one: the
+#: block is opt-in, so a repo that asks for release binaries at all is asking
+#: for the set its users are actually on, and omitting one silently ships a
+#: release that some of them cannot install.
+DEFAULT_GO_BINARY_PLATFORMS = (
+    "linux/amd64",
+    "linux/arm64",
+    "darwin/amd64",
+    "darwin/arm64",
+    "windows/amd64",
+    "windows/arm64",
+)
+
+
+@dataclass(frozen=True)
+class GoBinary:
+    """One cross-compiled command to build and attach to a release.
+
+    `package` is the `go build` target relative to the module directory, so the
+    common single-command repo needs only a `name`.
+    """
+    name: str
+    package: str = "."
+    # Which Go module to build from. Optional only while the repo has exactly
+    # one; with several, guessing would build the wrong module silently.
+    project: Optional[str] = None
+    platforms: tuple = ()                    # empty → ci.go.binary_platforms
+    # Passed verbatim to `go build -ldflags`. `$VERSION` and `$COMMIT` are
+    # exported by the build step, so a stamp reads
+    # `-X main.commit=$COMMIT` with no extra templating layer.
+    ldflags: str = "-s -w"
+    # "auto" packs windows as .zip and everything else as .tar.gz — the
+    # convention every Go release follows, because a tarball loses the
+    # executable bit nowhere but is awkward on Windows. "none" publishes the
+    # raw executable.
+    archive: str = "auto"                    # auto | tar.gz | zip | none
+    # Extra repo-relative files copied beside the binary into the archive
+    # (LICENSE, README). Ignored when archive is "none".
+    extra_files: tuple = ()
+    # Extra build environment. CGO_ENABLED=0 is applied first and can be
+    # overridden here, but cross-compiling with cgo needs a C toolchain the
+    # generated job does not install.
+    env: Mapping[str, str] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class CiGoConfig:
     """Per-language CI knobs for go flows."""
@@ -264,6 +310,11 @@ class CiGoConfig:
     # decision and must say who decided what. Entries that no longer match any
     # finding are reported so the list cannot quietly rot.
     govulncheck_ignore: tuple = ()
+    # Commands to cross-compile on a release tag. Empty (the default) generates
+    # no build jobs at all, so this cannot appear unbidden in an existing repo.
+    binaries: tuple = ()
+    # Default platform matrix for entries that name none.
+    binary_platforms: tuple = DEFAULT_GO_BINARY_PLATFORMS
 
 
 @dataclass(frozen=True)
@@ -702,7 +753,28 @@ _CI_GO_KEYS = (
     "module_tags",
     "govulncheck_version",
     "govulncheck_ignore",
+    "binaries",
+    "binary_platforms",
 )
+_CI_GO_BINARY_KEYS = (
+    "name",
+    "package",
+    "project",
+    "platforms",
+    "ldflags",
+    "archive",
+    "extra_files",
+    "env",
+)
+_CI_GO_BINARY_ARCHIVES = {"auto", "tar.gz", "zip", "none"}
+# Curated rather than exhaustive: `go tool dist list` accepts far more, but the
+# point of the check is to catch `mac/arm64` or `linux/x86_64` at config time
+# instead of as a build that produces nothing recognizable. Widen when a real
+# target is missing.
+_GOOS_CHOICES = {"linux", "darwin", "windows", "freebsd", "openbsd", "netbsd", "js", "wasip1"}
+_GOARCH_CHOICES = {
+    "amd64", "arm64", "386", "arm", "riscv64", "ppc64le", "s390x", "loong64", "wasm",
+}
 _CI_DOCKER_KEYS = (
     "default_platforms",
     "platform_runners",
@@ -940,6 +1012,110 @@ def _parse_ci_npm(raw: Any, project_versions: Mapping[str, str]) -> CiNpmConfig:
     return CiNpmConfig(**kwargs)
 
 
+def _parse_go_platforms(raw: Any, where: str) -> tuple:
+    """Validate a `GOOS/GOARCH` platform list."""
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError(f"{where}: expected a non-empty list of 'GOOS/GOARCH' strings")
+    out: List[str] = []
+    for item in raw:
+        platform = str(item).strip()
+        goos, _, goarch = platform.partition("/")
+        if not goos or not goarch or "/" in goarch:
+            raise ConfigError(
+                f"{where}: '{platform}' is not in 'GOOS/GOARCH' form (e.g. linux/amd64)"
+            )
+        if goos not in _GOOS_CHOICES:
+            raise ConfigError(
+                f"{where}: unknown GOOS '{goos}' in '{platform}'; "
+                f"expected one of {sorted(_GOOS_CHOICES)}"
+            )
+        if goarch not in _GOARCH_CHOICES:
+            raise ConfigError(
+                f"{where}: unknown GOARCH '{goarch}' in '{platform}'; "
+                f"expected one of {sorted(_GOARCH_CHOICES)}"
+            )
+        if platform in out:
+            raise ConfigError(f"{where}: duplicate platform '{platform}'")
+        out.append(platform)
+    return tuple(out)
+
+
+def _parse_go_binaries(raw: Any) -> tuple:
+    """Parse `ci.go.binaries` into GoBinary descriptors."""
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError("ci.go.binaries: expected a non-empty list of binary descriptors")
+    out: List[GoBinary] = []
+    seen: Dict[str, int] = {}
+    for idx, item in enumerate(raw):
+        at = f"ci.go.binaries[{idx}]"
+        block = _expect_mapping(item, at)
+        _reject_unknown(block, _CI_GO_BINARY_KEYS, at)
+
+        name = str(block.get("name", "")).strip()
+        if not name:
+            raise ConfigError(f"{at}.name: required — it is the published file name")
+        # The name lands in artifact names, job ids and release asset paths.
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+            raise ConfigError(
+                f"{at}.name: '{name}' must contain only letters, digits, '.', '_' or '-'"
+            )
+        if name in seen:
+            raise ConfigError(
+                f"{at}.name: '{name}' is already declared at ci.go.binaries[{seen[name]}]; "
+                "two entries of one name would overwrite each other's release assets"
+            )
+        seen[name] = idx
+
+        kwargs: Dict[str, Any] = {"name": name}
+        if "package" in block:
+            package = str(block["package"]).strip()
+            if not package:
+                raise ConfigError(f"{at}.package: expected a non-empty `go build` target")
+            kwargs["package"] = package
+        if block.get("project") is not None:
+            kwargs["project"] = str(block["project"])
+        if "platforms" in block:
+            kwargs["platforms"] = _parse_go_platforms(block["platforms"], f"{at}.platforms")
+        if "ldflags" in block:
+            # Explicitly empty is meaningful: build with no -ldflags at all.
+            ldflags = str(block["ldflags"])
+            # Emitted inside a double-quoted shell argument so `$VERSION` and
+            # `$COMMIT` expand; a double quote in the value would end that
+            # argument early and produce a build command nobody wrote.
+            if '"' in ldflags:
+                raise ConfigError(
+                    f"{at}.ldflags: double quotes are not allowed (the value is emitted "
+                    "inside a double-quoted shell argument); use single quotes"
+                )
+            kwargs["ldflags"] = ldflags
+        if "archive" in block:
+            archive = str(block["archive"])
+            if archive not in _CI_GO_BINARY_ARCHIVES:
+                raise ConfigError(
+                    f"{at}.archive: expected one of {sorted(_CI_GO_BINARY_ARCHIVES)}, "
+                    f"got '{archive}'"
+                )
+            kwargs["archive"] = archive
+        if "extra_files" in block:
+            files = block["extra_files"]
+            if not isinstance(files, list):
+                raise ConfigError(f"{at}.extra_files: expected a list of repo-relative paths")
+            kwargs["extra_files"] = tuple(str(f) for f in files)
+        if "env" in block:
+            env_block = _expect_mapping(block["env"], f"{at}.env")
+            env: Dict[str, str] = {}
+            for key, value in env_block.items():
+                if value is None:
+                    raise ConfigError(
+                        f"{at}.env.{key}: null is almost always a YAML accident; "
+                        'use "" for an intentionally empty value'
+                    )
+                env[str(key)] = str(value)
+            kwargs["env"] = env
+        out.append(GoBinary(**kwargs))
+    return tuple(out)
+
+
 def _parse_ci_go(raw: Any) -> CiGoConfig:
     if raw is None:
         return CiGoConfig()
@@ -1004,6 +1180,12 @@ def _parse_ci_go(raw: Any) -> CiGoConfig:
                 f"{sorted(_CI_GO_MODULE_TAG_MODES)}, got '{mode}'"
             )
         kwargs["module_tags"] = mode
+    if "binary_platforms" in block:
+        kwargs["binary_platforms"] = _parse_go_platforms(
+            block["binary_platforms"], "ci.go.binary_platforms"
+        )
+    if "binaries" in block:
+        kwargs["binaries"] = _parse_go_binaries(block["binaries"])
     return CiGoConfig(**kwargs)
 
 
@@ -1547,6 +1729,8 @@ __all__ = [
     "CiPythonConfig",
     "CiNpmConfig",
     "GovulncheckIgnore",
+    "GoBinary",
+    "DEFAULT_GO_BINARY_PLATFORMS",
     "CiGoConfig",
     "CiDockerConfig",
     "CiConfig",

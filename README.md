@@ -270,7 +270,7 @@ image descriptors are present:
 | `test-python.yml` | push/PR to `test_branches` | Matrix test across Python versions, per project |
 | `test-npm.yml` | push/PR to `test_branches` | Per-TS-project install + type-check + `npm test` |
 | `test-go.yml` | push/PR to `test_branches` | `go vet` + race-test + optional golangci-lint / govulncheck per Go project |
-| `publish-go.yml` | tag `v*.*.*` push | Reconcile per-module Go tags for the release |
+| `publish-go.yml` | tag `v*.*.*` push | Reconcile per-module Go tags; cross-compile release binaries |
 | `publish-python.yml` | tag `v*.*.*` push | Per-project PyPI publish in dependency order |
 | `publish-npm.yml` | tag `v*.*.*` push | Per-project npm publish in dependency order |
 | `build-docker.yml` | tag `v*.*.*` push + dispatch | Cascaded multi-arch image builds with inline test prereqs |
@@ -322,6 +322,64 @@ The check refuses to generate rather than emit a workflow that would bless that.
 Because the root tag drives everything, submodule tags like `api/v1.2.3` do not
 match the `v*.*.*` filters and trigger nothing — which is correct: they are the
 artifact, not the cause.
+
+### Release binaries (`ci.go.binaries`)
+
+A Go repo whose artifact is a *command* has nothing to publish to a registry —
+the release is the binary. `ci.go.binaries` cross-compiles each command across a
+platform matrix on the `v*.*.*` tag and attaches the results to the GitHub
+release:
+
+```yaml
+ci:
+  github_release: true
+  go:
+    binaries:
+      - name: mytool                       # published file name; also the job id
+        package: ./cmd/mytool              # `go build` target, relative to the module
+        # project: my-sdk-go               # required only with >1 Go module
+        platforms: [ linux/amd64, linux/arm64, windows/amd64, windows/arm64, darwin/arm64 ]
+        ldflags: "-s -w -X main.commit=$COMMIT"
+        extra_files: [ LICENSE, README.md ]
+    # Applies to any entry that declares no `platforms` of its own.
+    binary_platforms: [ linux/amd64, linux/arm64, darwin/arm64 ]
+```
+
+Assets are named `<name>_<version>_<goos>_<goarch>`, packed as `.zip` for
+Windows and `.tar.gz` elsewhere (`archive: tar.gz | zip | none` forces one), and
+published alongside a `checksums.txt`. `<version>` is the pushed tag with any
+leading `v` stripped; a `workflow_dispatch` run has no tag, so it builds
+`0.0.0-dev.<short-sha>` rather than an asset with an empty version in its name.
+
+`$VERSION` and `$COMMIT` are exported before `go build`, so `ldflags` can stamp
+them without a second templating layer. The value is emitted inside a
+double-quoted shell argument — which is what makes that expansion work — so a
+double quote in it is rejected at config time rather than producing a build
+command nobody wrote.
+
+Every leg builds on `ubuntu-latest` with `CGO_ENABLED=0`, because Go
+cross-compiles to all of these without a foreign toolchain and a per-OS runner
+would buy queue time and nothing else. `env:` can override that, but a cgo build
+also needs a runner that can link for the target, which this generator does not
+provide.
+
+Two behaviours are deliberate:
+
+- **`fail-fast: false`.** One unsupported target must not withhold the assets
+  for every platform that did build.
+- **`if-no-files-found: error`.** A silently empty upload surfaces as a release
+  that is merely *missing* a platform — which nobody notices until a user tries
+  to download it.
+
+Attaching to a release is gated on `ci.github_release`, the same switch the
+Python side uses: whether a repo cuts GitHub releases is one decision, not one
+per language. With it off the binaries are still built and uploaded as workflow
+artifacts. In a repo that publishes both Python distributions *and* Go binaries
+for one tag, the two workflows each attach their own files to that tag's
+release.
+
+`publish-go.yml` renders when *either* half applies, so a single-root-module
+repo — which has no module tags to reconcile — still gets one for its binaries.
 
 ### Accepted-risk advisories (`govulncheck_ignore`)
 
@@ -667,6 +725,9 @@ ci:
     module_tags: none                           # none | verify | push (see publish-go below)
     govulncheck_version: "v1.1.4"               # pinned; an unpinned scanner reddens unrelated PRs
     govulncheck_ignore: []                      # accepted-risk advisories; see below
+    binaries: []                                # commands to cross-compile for the release; see above
+    binary_platforms:                           # default matrix for entries declaring none
+      [ linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64 ]
   docker:
     default_platforms: [linux/amd64, linux/arm64]
     platform_runners:                           # native runners; missing platforms fall back to QEMU
