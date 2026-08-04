@@ -1526,13 +1526,27 @@ def _docker_build_args(
     docker_cfg,
     indent: str = "      ",
 ) -> str:
-    """Cascade BASE_IMAGE build-arg block, or empty when no parent."""
-    if parent_node is None:
+    """Build-arg block: the BASE_IMAGE cascade plus any declared `build_args`.
+
+    The two are MERGED, not alternatives — an image can both inherit from a parent
+    and pin its own arguments. Declared args are emitted after the cascade and
+    sorted, so output is stable across runs and reordering the config does not
+    surface as CI drift.
+    """
+    lines: List[str] = []
+    if parent_node is not None:
+        parent_primary = _docker_primary_ref(docker_cfg, _image_ref_name(parent_node.image))
+        parent_job = _docker_parent_job_id(parent_node)
+        lines.append(
+            f"{indent}      {node.image.base_image_arg}="
+            f"{parent_primary}:${{{{ needs.{parent_job}.outputs.base-tag }}}}"
+        )
+    lines.extend(f"{indent}      {arg}={value}" for arg, value in sorted(node.image.build_args.items()))
+    if not lines:
         return ""
-    parent_primary = _docker_primary_ref(docker_cfg, _image_ref_name(parent_node.image))
-    parent_job = _docker_parent_job_id(parent_node)
+    body = "\n".join(lines)
     return f"""{indent}    build-args: |
-{indent}      {node.image.base_image_arg}={parent_primary}:${{{{ needs.{parent_job}.outputs.base-tag }}}}
+{body}
 """
 
 

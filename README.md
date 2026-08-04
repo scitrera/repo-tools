@@ -786,7 +786,41 @@ docker:
       tag_style: dev                           # dev- prefixed tags; suppresses :latest
       version_from: aether-gateway
       # base_image_arg: BASE_IMAGE             # override the build-arg name (default: BASE_IMAGE)
+    embed-server:
+      context: .
+      dockerfile: embed-server/Dockerfile
+      build_args:                              # extra --build-arg values
+        AETHER_VERSION: "${preferred_versions:container:ghcr.io/scitrera/aether}"
+        AETHER_CLIENT_VERSION: "${preferred_versions:python:scitrera-aether-client}"
+        FEATURE_FLAG: "1"                      # plain literals work too
+        OPTIONAL_PIN: ""                       # explicitly empty is passed through
 ```
+
+**Build args.** `build_args` are **merged with** the `BASE_IMAGE` cascade, not an
+alternative to it — an image can inherit from a parent *and* pin its own
+arguments. Emission is sorted, so reordering the config does not surface as CI
+drift. An explicit `""` is passed through (Dockerfiles commonly use an empty arg
+to mean "no pin"); a `null` value is rejected, since that is almost always a YAML
+accident rather than an intent.
+
+**`${preferred_versions:<language>:<package>}`** substitutes a value declared in
+the `preferred_versions:` block, so a version bundled into an image is pinned from
+the same place every other dependency is pinned — the same reasoning that pins
+`ruff` for the lint step and `protoc-gen-go` for the proto lane. The language
+bucket is free-form (`container:` for image tags is as valid as `python:`), and
+the package half may contain dots, slashes and `@`
+(`google.golang.org/protobuf`, `@modelcontextprotocol/sdk`).
+
+Substitution is **verbatim** and may be embedded in a larger string
+(`"v${...}-gpu"`). Preferred versions hold both bare pins (`0.0.69`) and specs
+(`>=0.2.2`), and only the consuming Dockerfile knows which it needs — a
+`pkg==${ARG}` line requires a bare pin — so no conversion between the two is
+attempted. References resolve at **parse time**: an unknown language, an unknown
+package, or a declared-but-empty value is a config error naming the file, rather
+than an empty build-arg that builds green and ships a subtly wrong image.
+
+Unknown keys in an image descriptor are rejected, so `buld_args:` fails loudly
+instead of being silently ignored.
 
 **Image naming.** By default the descriptor key *is* the pushed repository name.
 `image_name` decouples them, which is required when two descriptors publish to

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
@@ -347,6 +348,12 @@ class DockerImage:
     version_from: Optional[str] = None
     base_image_arg: str = "BASE_IMAGE"
     build_strategy: str = "auto"             # "auto" | "qemu" | "native"
+    # Extra `--build-arg` values, MERGED with the `base_image_arg` cascade rather
+    # than replacing it. Values are resolved at parse time, so a
+    # `${preferred_versions:<lang>:<pkg>}` reference lands in the generated
+    # workflow as a literal — visible in the diff, and a bad reference fails as a
+    # config error instead of baking an empty string into a released image.
+    build_args: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -705,6 +712,23 @@ _CI_GO_LINT_CHOICES = {"golangci-lint", "none"}
 _CI_GO_MODULE_TAG_MODES = {"none", "verify", "push"}
 _DOCKER_TAG_STYLES = {"standard", "dev"}
 _DOCKER_BUILD_STRATEGIES = {"auto", "qemu", "native"}
+_DOCKER_IMAGE_KEYS = (
+    "context",
+    "dockerfile",
+    "image_name",
+    "tag_style",
+    "platforms",
+    "needs",
+    "version_from",
+    "base_image_arg",
+    "build_strategy",
+    "build_args",
+)
+
+# `${preferred_versions:<language>:<package>}`. The package half deliberately
+# allows dots, slashes and `@` so real names work unquoted —
+# `google.golang.org/protobuf`, `@modelcontextprotocol/sdk`.
+_PREFERRED_REF_RE = re.compile(r"\$\{preferred_versions:([^:}]+):([^}]+)\}")
 _DOCKER_TEST_PREREQ_CHOICES = {"python", "npm", "go"}
 
 
@@ -1077,8 +1101,72 @@ def _parse_ci(raw: Any, project_versions: Mapping[str, str]) -> CiConfig:
     return CiConfig(**kwargs)
 
 
-def _parse_docker_image(name: str, raw: Any) -> DockerImage:
+def _resolve_preferred_refs(value: str, preferred: PreferredVersions, where: str) -> str:
+    """Substitute `${preferred_versions:<language>:<package>}` references.
+
+    Substitution is VERBATIM — whatever is declared is what gets passed. Preferred
+    versions hold both bare pins ("0.0.69") and specs (">=0.2.2"), and only the
+    consumer knows which it needs, so silently converting between them would be
+    guessing. A Dockerfile doing `pkg==${ARG}` must reference a bare pin.
+
+    Resolving here rather than at render time means an unknown language or package
+    is a config error naming the file, instead of an empty build-arg that succeeds
+    and produces a subtly wrong image.
+    """
+
+    def _sub(match: "re.Match[str]") -> str:
+        language, package = match.group(1).strip(), match.group(2).strip()
+        table = preferred.for_language(language)
+        if not table:
+            known = sorted(preferred.by_language) or ["<none declared>"]
+            raise ConfigError(
+                f"{where}: no preferred_versions.{language} block "
+                f"(declared languages: {known})"
+            )
+        if package not in table:
+            raise ConfigError(
+                f"{where}: '{package}' is not declared in preferred_versions."
+                f"{language} (declared: {sorted(table)})"
+            )
+        declared = table[package]
+        if declared is None or not str(declared).strip():
+            raise ConfigError(
+                f"{where}: preferred_versions.{language}['{package}'] is empty, "
+                "so it cannot be substituted into a build arg"
+            )
+        return str(declared).strip()
+
+    return _PREFERRED_REF_RE.sub(_sub, value)
+
+
+def _parse_docker_build_args(
+    name: str, block: Mapping[str, Any], preferred: PreferredVersions
+) -> Dict[str, str]:
+    raw = block.get("build_args")
+    if raw is None:
+        return {}
+    args_block = _expect_mapping(raw, f"docker.images.{name}.build_args")
+    out: Dict[str, str] = {}
+    for key, val in args_block.items():
+        arg = str(key).strip()
+        if not arg:
+            raise ConfigError(f"docker.images.{name}.build_args: empty arg name")
+        # An explicit empty value is legitimate — the embed-server image uses one to
+        # mean "no pin, take the latest" — so only None is rejected.
+        if val is None:
+            raise ConfigError(
+                f"docker.images.{name}.build_args.{arg}: null is not a value; use "
+                '"" for an intentionally empty arg'
+            )
+        out[arg] = _resolve_preferred_refs(
+            str(val), preferred, f"docker.images.{name}.build_args.{arg}"
+        )
+    return out
+
+
+def _parse_docker_image(name: str, raw: Any, preferred: PreferredVersions) -> DockerImage:
     block = _expect_mapping(raw, f"docker.images.{name}")
+    _reject_unknown(block, _DOCKER_IMAGE_KEYS, f"docker.images.{name}")
     if "context" not in block or not isinstance(block["context"], str):
         raise ConfigError(f"docker.images.{name}.context: required string")
     if "dockerfile" not in block or not isinstance(block["dockerfile"], str):
@@ -1131,10 +1219,15 @@ def _parse_docker_image(name: str, raw: Any) -> DockerImage:
                 f"{sorted(_DOCKER_BUILD_STRATEGIES)}, got '{bs}'"
             )
         kwargs["build_strategy"] = bs
+    build_args = _parse_docker_build_args(name, block, preferred)
+    if build_args:
+        kwargs["build_args"] = build_args
     return DockerImage(**kwargs)
 
 
-def _parse_docker(raw: Any, project_versions: Mapping[str, str]) -> DockerConfig:
+def _parse_docker(
+    raw: Any, project_versions: Mapping[str, str], preferred: PreferredVersions
+) -> DockerConfig:
     if raw is None:
         return DockerConfig()
     block = _expect_mapping(raw, "docker")
@@ -1151,7 +1244,7 @@ def _parse_docker(raw: Any, project_versions: Mapping[str, str]) -> DockerConfig
     images_map = _expect_mapping(images_raw, "docker.images")
     images: Dict[str, DockerImage] = {}
     for img_name, img_block in images_map.items():
-        images[str(img_name)] = _parse_docker_image(str(img_name), img_block)
+        images[str(img_name)] = _parse_docker_image(str(img_name), img_block, preferred)
 
     # Cross-image validation: every needs target must refer to a defined image.
     image_names = set(images)
@@ -1403,7 +1496,7 @@ def load_config(yaml_path: Path, *, root: Optional[Path] = None) -> SyncConfig:
     sources = _parse_sources(data.get("sources"))
     go_toolchain = _parse_go_toolchain(data.get("go_toolchain"))
     ci = _parse_ci(data.get("ci"), project_versions)
-    docker = _parse_docker(data.get("docker"), project_versions)
+    docker = _parse_docker(data.get("docker"), project_versions, preferred)
     proto = _parse_proto(data.get("proto"), preferred)
 
     return SyncConfig(
