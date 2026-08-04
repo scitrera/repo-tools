@@ -185,3 +185,68 @@ class TestBuildArgsValidation:
         """Image descriptors previously ignored unknown keys, so typos were silent."""
         with pytest.raises(ConfigError, match="unknown key"):
             _load(tmp_path, write_file, "      buld_args:\n        X: \"1\"\n")
+
+
+class TestCacheScoping:
+    """BuildKit's gha cache backend defaults to ONE shared scope.
+
+    Unscoped, every build job in the workflow — each image times each architecture —
+    reads and writes the same cache and evicts the others, so a multi-image repo
+    effectively builds cold every time. That is invisible in the generated YAML and
+    only shows up as build minutes, which is why it is pinned by a test.
+    """
+
+    def _cache_scopes(self, doc: dict) -> dict:
+        out = {}
+        for name, job in doc["jobs"].items():
+            if not name.startswith("build-"):
+                continue
+            for step in job.get("steps", []):
+                with_ = step.get("with") or {}
+                for key in ("cache-from", "cache-to"):
+                    if key in with_:
+                        assert "scope=" in with_[key], f"{name}.{key} is unscoped"
+                        out.setdefault(name, set()).add(with_[key].split("scope=")[1])
+        return out
+
+    def test_every_build_job_scopes_its_cache(self, tmp_path, write_file):
+        scopes = self._cache_scopes(_render(tmp_path, write_file, ""))
+        assert scopes, "expected build jobs with cache configuration"
+
+    def test_scopes_do_not_collide_across_jobs(self, tmp_path, write_file):
+        """Two images, two architectures — four jobs, four distinct scopes."""
+        scopes = self._cache_scopes(_render(tmp_path, write_file, ""))
+        flat = [s for job in scopes.values() for s in job]
+        assert len(set(flat)) == len(scopes), f"cache scope collision: {scopes}"
+
+    def test_cache_from_and_cache_to_agree(self, tmp_path, write_file):
+        """A job that reads one scope and writes another would never hit."""
+        for job, values in self._cache_scopes(_render(tmp_path, write_file, "")).items():
+            assert len(values) == 1, f"{job}: cache-from/cache-to scopes differ: {values}"
+
+
+class TestOciLabels:
+    """Labels are baked into the image config at build time.
+
+    A manifest-list merge cannot add them afterwards, so a build job that omits them
+    publishes images with no org.opencontainers.image.source — which is what links a
+    GHCR package back to its repository. Dockerfiles are not required to carry static
+    LABELs, so the workflow has to supply them.
+    """
+
+    def test_build_jobs_apply_metadata_labels(self, tmp_path, write_file):
+        doc = _render(tmp_path, write_file, "")
+        checked = 0
+        for name, job in doc["jobs"].items():
+            if not name.startswith("build-"):
+                continue
+            step_ids = {s.get("id") for s in job.get("steps", [])}
+            assert "meta" in step_ids, f"{name}: no metadata step to source labels from"
+            for step in job.get("steps", []):
+                if "build-push-action" in str(step.get("uses", "")):
+                    labels = (step.get("with") or {}).get("labels")
+                    assert labels and "steps.meta.outputs.labels" in labels, (
+                        f"{name}: build step does not apply labels"
+                    )
+                    checked += 1
+        assert checked, "expected at least one build job"

@@ -1606,8 +1606,8 @@ def _qemu_build_job(
           push: ${{{{ github.event_name != 'pull_request' }}}}
           tags: ${{{{ steps.meta.outputs.tags }}}}
           labels: ${{{{ steps.meta.outputs.labels }}}}
-{build_args}          cache-from: type=gha
-          cache-to: type=gha,mode=max
+{build_args}          cache-from: type=gha,scope={img.name}
+          cache-to: type=gha,mode=max,scope={img.name}
 """
 
 
@@ -1634,6 +1634,15 @@ def _native_per_platform_job(
 
     login_steps = _docker_login_steps(docker_cfg)
     build_args = _docker_build_args(node, parent_node, docker_cfg)
+    # OCI labels are baked into the image config at BUILD time, so a manifest-list
+    # merge cannot add them afterwards — they have to be produced here or not at all.
+    # Without this the per-arch images carry no org.opencontainers.image.source, which
+    # is what links a GHCR package back to its repository. The qemu path already does
+    # this; the native path did not. The tag patterns this step also computes are
+    # unused here, since push-by-digest ignores `tags:`.
+    meta_step = _docker_meta_step(
+        _image_ref_name(img), docker_cfg, img.tag_style, img.version_from
+    )
 
     return f"""  build-{img.name}-{slug}:
     name: Build {img.name} ({platform})
@@ -1648,16 +1657,17 @@ def _native_per_platform_job(
 
       - uses: {DOCKER_BUILDX}
 
-{login_steps}      - name: Build and push by digest
+{login_steps}{meta_step}      - name: Build and push by digest
         id: build
         uses: {DOCKER_BUILD_PUSH}
         with:
           context: {img.context}
           file: {img.dockerfile}
           platforms: {platform}
+          labels: ${{{{ steps.meta.outputs.labels }}}}
           outputs: type=image,name={primary},push-by-digest=true,name-canonical=true,push=true
-{build_args}          cache-from: type=gha
-          cache-to: type=gha,mode=max
+{build_args}          cache-from: type=gha,scope={img.name}-{slug}
+          cache-to: type=gha,mode=max,scope={img.name}-{slug}
 """
 
 
