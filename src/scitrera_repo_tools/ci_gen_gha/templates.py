@@ -1490,16 +1490,26 @@ def _docker_meta_step(
     tag_style: str,
     version_from: Optional[str],
     indent: str = "      ",
+    tag_suffix: Optional[str] = None,
 ) -> str:
     """Generate docker/metadata-action step + tag patterns."""
     refs = _docker_image_refs(docker_cfg, image_name)
     images_lines = "\n".join(f"{indent}      {r}" for r in refs)
     tag_lines = _docker_tag_lines(tag_style, version_from)
     tags_block = "\n".join(f"{indent}      {t}" for t in tag_lines)
-    flavor = ""
+    flavor_lines: List[str] = []
     if tag_style == "dev":
+        flavor_lines.append("latest=false")
+    if tag_suffix:
+        # `onlatest=true` so `latest` becomes `latest<suffix>` too. Without it the
+        # variant would claim the bare `latest` tag and overwrite whichever variant
+        # published last — the two would silently fight over one tag.
+        flavor_lines.append(f"suffix={tag_suffix},onlatest=true")
+    flavor = ""
+    if flavor_lines:
+        body = "\n".join(f"{indent}      {line}" for line in flavor_lines)
         flavor = f"""{indent}    flavor: |
-{indent}      latest=false
+{body}
 """
 
     return f"""{indent}- name: Docker metadata
@@ -1577,7 +1587,8 @@ def _qemu_build_job(
         else ""
     )
     meta_step = _docker_meta_step(
-        _image_ref_name(img), docker_cfg, img.tag_style, img.version_from
+        _image_ref_name(img), docker_cfg, img.tag_style, img.version_from,
+        tag_suffix=img.tag_suffix,
     )
     build_args = _docker_build_args(node, parent_node, docker_cfg)
 
@@ -1641,7 +1652,8 @@ def _native_per_platform_job(
     # this; the native path did not. The tag patterns this step also computes are
     # unused here, since push-by-digest ignores `tags:`.
     meta_step = _docker_meta_step(
-        _image_ref_name(img), docker_cfg, img.tag_style, img.version_from
+        _image_ref_name(img), docker_cfg, img.tag_style, img.version_from,
+        tag_suffix=img.tag_suffix,
     )
 
     return f"""  build-{img.name}-{slug}:
@@ -1696,7 +1708,8 @@ def _native_merge_job(
         else ""
     )
     meta_step = _docker_meta_step(
-        _image_ref_name(img), docker_cfg, img.tag_style, img.version_from
+        _image_ref_name(img), docker_cfg, img.tag_style, img.version_from,
+        tag_suffix=img.tag_suffix,
     )
 
     return f"""  merge-{img.name}:

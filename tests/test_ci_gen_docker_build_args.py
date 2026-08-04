@@ -225,6 +225,93 @@ class TestCacheScoping:
             assert len(values) == 1, f"{job}: cache-from/cache-to scopes differ: {values}"
 
 
+TAG_VARIANTS = """\
+app: 0.2.0
+
+ci:
+  docker:
+    platform_runners:
+      linux/amd64: ubuntu-latest
+      linux/arm64: ubuntu-24.04-arm
+
+docker:
+  ghcr: acme
+  dockerhub: acme
+  images:
+    svc:
+      context: .
+      dockerfile: Dockerfile.cpu
+    svc-cuda13:
+      context: .
+      dockerfile: Dockerfile
+      image_name: svc
+      tag_suffix: -cuda13
+"""
+
+
+class TestTagSuffix:
+    """Two build variants sharing one repository, told apart only by tag.
+
+    A CPU image published as `svc:1.2.3` beside a CUDA one at `svc:1.2.3-cuda13`.
+    Distinct from `tag_style: dev`, which prefixes and suppresses `latest`.
+    """
+
+    def _doc(self, tmp_path, write_file):
+        write_file(tmp_path / "versions.yaml", TAG_VARIANTS)
+        cfg = load_config(tmp_path / "versions.yaml")
+        return yaml.safe_load(build_build_docker(cfg, cfg.ci))
+
+    def _flavor(self, doc, job):
+        for step in doc["jobs"][job].get("steps", []):
+            if "metadata-action" in str(step.get("uses", "")):
+                return (step.get("with") or {}).get("flavor", "")
+        return ""
+
+    def test_suffix_is_applied_to_the_variant_only(self, tmp_path, write_file):
+        doc = self._doc(tmp_path, write_file)
+        assert "suffix=-cuda13" in self._flavor(doc, "merge-svc-cuda13")
+        assert "suffix=" not in self._flavor(doc, "merge-svc")
+
+    def test_suffix_also_applies_to_latest(self, tmp_path, write_file):
+        """Without onlatest the variant would claim the bare `latest` tag.
+
+        Both variants would then overwrite whichever published last, silently.
+        """
+        assert "onlatest=true" in self._flavor(self._doc(tmp_path, write_file), "merge-svc-cuda13")
+
+    def test_variants_share_a_repository(self, tmp_path, write_file):
+        doc = self._doc(tmp_path, write_file)
+        def images(job):
+            for step in doc["jobs"][job].get("steps", []):
+                if "metadata-action" in str(step.get("uses", "")):
+                    return set((step["with"]["images"]).split())
+            return set()
+        assert images("merge-svc") == images("merge-svc-cuda13")
+
+    def test_variants_get_distinct_jobs_and_cache_scopes(self, tmp_path, write_file):
+        doc = self._doc(tmp_path, write_file)
+        scopes = set()
+        for name, job in doc["jobs"].items():
+            if not name.startswith("build-"):
+                continue
+            for step in job.get("steps", []):
+                cf = (step.get("with") or {}).get("cache-from")
+                if cf:
+                    scopes.add(cf.split("scope=")[1])
+        assert len(scopes) == 4, f"two variants x two arches need four scopes: {scopes}"
+
+    def test_suffix_must_start_with_a_separator(self, tmp_path, write_file):
+        """'cuda13' would weld onto the version as 1.2.3cuda13 — a different version."""
+        write_file(tmp_path / "versions.yaml", TAG_VARIANTS.replace("-cuda13", "cuda13"))
+        with pytest.raises(ConfigError, match="must start with"):
+            load_config(tmp_path / "versions.yaml")
+
+    def test_empty_suffix_is_rejected(self, tmp_path, write_file):
+        write_file(tmp_path / "versions.yaml", TAG_VARIANTS.replace("-cuda13", '""'))
+        with pytest.raises(ConfigError, match="non-empty"):
+            load_config(tmp_path / "versions.yaml")
+
+
 class TestOciLabels:
     """Labels are baked into the image config at build time.
 

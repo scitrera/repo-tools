@@ -343,6 +343,11 @@ class DockerImage:
     # `myimg:*` — which is impossible if the key doubles as the image name.
     image_name: Optional[str] = None
     tag_style: str = "standard"              # "standard" | "dev"
+    # Appended to every generated tag, including `latest`. The point is variants of one
+    # image that share a repository and differ only by tag — e.g. a CUDA build published
+    # as `img:1.2.3-cuda13` beside a CPU `img:1.2.3`. Distinct from `tag_style: dev`,
+    # which PREFIXES and suppresses `latest`.
+    tag_suffix: Optional[str] = None
     platforms: Optional[tuple] = None        # default: ci.docker.default_platforms
     needs: Optional[str] = None
     version_from: Optional[str] = None
@@ -723,6 +728,7 @@ _DOCKER_IMAGE_KEYS = (
     "base_image_arg",
     "build_strategy",
     "build_args",
+    "tag_suffix",
 )
 
 # `${preferred_versions:<language>:<package>}`. The package half deliberately
@@ -1207,6 +1213,21 @@ def _parse_docker_image(name: str, raw: Any, preferred: PreferredVersions) -> Do
             )
         if needs is not None:
             kwargs["needs"] = str(needs)
+    if "tag_suffix" in block and block["tag_suffix"] is not None:
+        suffix = str(block["tag_suffix"]).strip()
+        if not suffix:
+            raise ConfigError(
+                f"docker.images.{name}.tag_suffix: expected non-empty string; omit the "
+                "key for no suffix"
+            )
+        # A suffix that does not start with a separator silently welds onto the version
+        # ("1.2.3cuda13"), which reads as a different version rather than a variant.
+        if suffix[0] not in "-._":
+            raise ConfigError(
+                f"docker.images.{name}.tag_suffix: '{suffix}' must start with '-', '.' "
+                "or '_' so it reads as a variant rather than part of the version"
+            )
+        kwargs["tag_suffix"] = suffix
     if "version_from" in block:
         kwargs["version_from"] = str(block["version_from"])
     if "base_image_arg" in block:

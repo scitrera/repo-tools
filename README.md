@@ -796,6 +796,29 @@ docker:
         OPTIONAL_PIN: ""                       # explicitly empty is passed through
 ```
 
+**Tag variants.** `tag_suffix` appends to every generated tag, `latest` included, so
+two descriptors can publish build variants of one image into one repository —
+a CPU build at `img:1.2.3` beside a CUDA one at `img:1.2.3-cuda13`, sharing
+`image_name` and differing only by tag:
+
+```yaml
+    embed-server:
+      context: .
+      dockerfile: Dockerfile.cpu
+    embed-server-cuda13:
+      context: .
+      dockerfile: Dockerfile
+      image_name: embed-server                 # same repository
+      tag_suffix: -cuda13                      # 1.2.3-cuda13, latest-cuda13
+```
+
+The suffix must start with `-`, `.` or `_`, otherwise it welds onto the version
+(`1.2.3cuda13`) and reads as a different version rather than a variant. `latest` is
+suffixed too (`onlatest=true`): without that the variant would claim the bare
+`latest` tag and the two variants would silently overwrite whichever published last.
+This differs from `tag_style: dev`, which *prefixes* and suppresses `latest`; the two
+compose if a variant needs both.
+
 **Build args.** `build_args` are **merged with** the `BASE_IMAGE` cascade, not an
 alternative to it — an image can inherit from a parent *and* pin its own
 arguments. Emission is sorted, so reordering the config does not surface as CI
