@@ -3,4 +3,4 @@
 #  Copyright (c) 2026. Scitrera LLC. Licensed under 3-clause BSD license
 #  (see LICENSE file at https://github.com/scitrera/repo-tools/blob/main/LICENSE)
 
-__version__ = "0.1.25"
+__version__ = "0.1.26"

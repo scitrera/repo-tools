@@ -15,6 +15,7 @@ from typing import Iterable, List, Optional
 from ..compile_protos.tools import resolve_ts_package_dir
 from ..version_sync.config import CiConfig, SyncConfig
 from ..version_sync.discovery import manifests_for_language
+from .go_cache import go_cache_with
 from ..version_sync.normalize import normalize_python
 from .topology import PublishNode, docker_order, publish_order
 
@@ -513,7 +514,9 @@ def _npm_test_job(
 {upload_step}"""
 
 
-def _go_test_job(project: str, project_dir: str, go_version: str, ci: CiConfig) -> str:
+def _go_test_job(
+    project: str, project_dir: str, go_version: str, ci: CiConfig, cache_with: str
+) -> str:
     go = ci.go
     test_args = go.test_args
     coverage_step = ""
@@ -541,7 +544,7 @@ def _go_test_job(project: str, project_dir: str, go_version: str, ci: CiConfig) 
       - uses: {SETUP_GO}
         with:
           go-version: '{go_version}'
-          cache-dependency-path: {project_dir}/go.sum
+{cache_with}
 
       - name: go vet
         run: go vet ./...
@@ -553,7 +556,7 @@ def _go_test_job(project: str, project_dir: str, go_version: str, ci: CiConfig) 
 {coverage_step}"""
 
 
-def _go_lint_job(project: str, project_dir: str, ci: CiConfig) -> str:
+def _go_lint_job(project: str, project_dir: str, ci: CiConfig, cache_with: str) -> str:
     go = ci.go
     return f"""  lint-{project}:
     name: Lint {project}
@@ -564,7 +567,7 @@ def _go_lint_job(project: str, project_dir: str, ci: CiConfig) -> str:
       - uses: {SETUP_GO}
         with:
           go-version: '{_go_version_placeholder}'
-          cache-dependency-path: {project_dir}/go.sum
+{cache_with}
 
       - name: golangci-lint
         uses: {GOLANGCI_LINT_ACTION}
@@ -575,7 +578,9 @@ def _go_lint_job(project: str, project_dir: str, ci: CiConfig) -> str:
 """
 
 
-def _go_security_job(project: str, project_dir: str, go_version: str, ci: CiConfig) -> str:
+def _go_security_job(
+    project: str, project_dir: str, go_version: str, ci: CiConfig, cache_with: str
+) -> str:
     """govulncheck for one module, filtered through the accepted-risk allow-list.
 
     govulncheck has no native suppression, so the scan runs with `-format json`
@@ -605,7 +610,7 @@ def _go_security_job(project: str, project_dir: str, go_version: str, ci: CiConf
       - uses: {SETUP_GO}
         with:
           go-version: '{go_version}'
-          cache-dependency-path: {project_dir}/go.sum
+{cache_with}
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@{go.govulncheck_version}
@@ -680,13 +685,16 @@ def build_test_go(config: SyncConfig, ci: CiConfig) -> str:
     jobs: List[str] = []
     for p in projects:
         pdir = _project_dir(config, "go", p)
-        jobs.append(_go_test_job(p, pdir, go_version, ci))
+        cache_with = go_cache_with(config.root, p, pdir)
+        jobs.append(_go_test_job(p, pdir, go_version, ci, cache_with))
         if ci.go.lint == "golangci-lint":
             jobs.append(
-                _go_lint_job(p, pdir, ci).replace(_go_version_placeholder, go_version)
+                _go_lint_job(p, pdir, ci, cache_with).replace(
+                    _go_version_placeholder, go_version
+                )
             )
         if ci.go.enable_govulncheck:
-            jobs.append(_go_security_job(p, pdir, go_version, ci))
+            jobs.append(_go_security_job(p, pdir, go_version, ci, cache_with))
 
     return f"""{GENERATED_HEADER}
 name: Test (Go)
@@ -1111,6 +1119,7 @@ def _go_binary_build_job(
     go_version: str,
     ci: CiConfig,
     needs: List[str],
+    cache_with: str,
 ) -> str:
     """Cross-compile one command across its platform matrix.
 
@@ -1149,7 +1158,7 @@ def _go_binary_build_job(
       - uses: {SETUP_GO}
         with:
           go-version: '{go_version}'
-          cache-dependency-path: {project_dir}/go.sum
+{cache_with}
 
       - name: Build
         working-directory: {project_dir}
@@ -1261,13 +1270,15 @@ def build_publish_go(config: SyncConfig, ci: CiConfig) -> str:
         build_ids: List[str] = []
         for binary in go.binaries:
             project = _resolve_binary_project(binary, go_projects)
+            pdir = _project_dir(config, "go", project)
             parts.append(
                 _go_binary_build_job(
                     binary,
-                    _project_dir(config, "go", project),
+                    pdir,
                     go_version,
                     ci,
                     gate_ids,
+                    go_cache_with(config.root, project, pdir),
                 )
             )
             build_ids.append(f"build-{binary.name}")
@@ -2025,7 +2036,12 @@ def _inline_test_jobs(config: SyncConfig, ci: CiConfig, prereqs=None) -> tuple:
     if "go" in test_prereqs:
         go_version = _go_version(config)
         for p in _go_projects(config):
-            parts.append(_go_test_job(p, _project_dir(config, "go", p), go_version, ci))
+            pdir = _project_dir(config, "go", p)
+            parts.append(
+                _go_test_job(
+                    p, pdir, go_version, ci, go_cache_with(config.root, p, pdir)
+                )
+            )
             ids.append(f"test-{p}")
 
     return "\n".join(parts), ids

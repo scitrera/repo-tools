@@ -99,7 +99,9 @@ sources:
     - "uv.lock"
 
 # Global Go toolchain directives (optional, no-inject)
-# Walks every go.mod referenced in project_rules.gomod_require.
+# Walks every declared Go module — the `gomod` rule when present, otherwise the
+# `gomod_require` fallback. `go` is a minimum, not a pin: `1.25` admits any
+# 1.25.x and later, whereas `1.25.11` locks out every earlier patch release.
 go_toolchain:
   go:        "1.25"      # rewrites the `go X.Y` directive
   toolchain: "1.25.10"   # rewrites `toolchain goX.Y.Z` (Go 1.21+ feature)
@@ -775,6 +777,25 @@ project_rules:
 
 Existing repos need no change — with no `gomod` rule the old `gomod_require`
 fallback still applies.
+
+**Go module caching and `go.sum`.** Every generated Go job keys the `setup-go`
+cache on the module's `go.sum`. Pointing `cache-dependency-path` at a file that
+does not exist is not a cache miss — the action fails the step with "Some
+specified paths were not resolved, unable to cache dependencies", so the whole
+Go lane goes red before compiling anything.
+
+A module can legitimately have no `go.sum`: Go records checksums only for what
+it downloads, so a module requiring nothing external — or whose every
+requirement is redirected to a local directory by a `replace` — never gets the
+file. Those modules render `cache: false` instead, since there is nothing to
+cache either.
+
+The other reason `go.sum` goes missing is that nobody committed it, and that
+module cannot build from a clean checkout at all. Emitting `cache: false` for
+it would swap a clear failure at generation time for a baffling one during
+`go build`, so a `go.mod` with unreplaced requirements and no `go.sum` is a
+**generation error** naming the directory to run `go mod tidy` in. Indirect
+requirements count: they are downloaded and verified like any other.
 
 **Pinning the linter.** When `preferred_versions.python` declares a `ruff`
 entry, the generated lint step installs that exact spec

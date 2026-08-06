@@ -280,7 +280,12 @@ def test_unknown_project_is_an_error(tmp_path, write_file):
 
 
 def test_build_runs_in_the_module_directory(tmp_path, write_file):
-    write_file(tmp_path / "sdk/go.mod", "module example.com/repo/sdk\n\ngo 1.25\n")
+    # A module with a real dependency, so it has the go.sum the cache keys on.
+    write_file(
+        tmp_path / "sdk/go.mod",
+        "module example.com/repo/sdk\n\ngo 1.25\n\nrequire example.com/dep v1.0.0\n",
+    )
+    write_file(tmp_path / "sdk/go.sum", "example.com/dep v1.0.0 h1:abc=\n")
     write_file(tmp_path / "versions.yaml", '''\
 app: 1.2.3
 project_rules:
