@@ -83,6 +83,12 @@ project_rules:
     - { type: init_py,   path: my-python-pkg/src/my_pkg/__init__.py }
   my-ts-pkg:
     - { type: package,   path: my-ts-pkg/package.json }
+  my-go-cmd:
+    - { type: gomod,      path: go.mod }               # module declaration for CI
+    # Rewrites `const Version = "..."` or `var version = "..."` — the latter is
+    # the shape a command declares so `-ldflags "-X main.version=..."` can
+    # override it, and its baked default is what `go install` reports.
+    - { type: go_version, path: cmd/my-tool/main.go }
 
 # Internal monorepo cross-reference sync (optional)
 dependency_mappings:

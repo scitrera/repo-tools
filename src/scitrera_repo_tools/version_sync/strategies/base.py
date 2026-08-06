@@ -13,9 +13,22 @@ _RE_INIT_VERSION = re.compile(
     r'''^(\s*__version__\s*=\s*['"])[^'"]*(['"])''', re.MULTILINE
 )
 
-_RE_GO_VERSION = re.compile(
+# The original form: an exported `const Version = "..."` for importers to read.
+# Still matched first — see `_RE_GO_VERSION_ANY`.
+_RE_GO_VERSION_CONST = re.compile(
     r'^(\s*const\s+Version\s*=\s*")[^"]*(")', re.MULTILINE
 )
+
+# Also accepts the idiom a command uses: an unexported `var version = "..."`
+# that `-ldflags "-X main.version=..."` overrides at build time. Its baked-in
+# default is what `go install` and local builds report, so it drifts silently
+# unless synced too. The optional `string` allows `var version string = "..."`.
+_RE_GO_VERSION_ANY = re.compile(
+    r'^(\s*(?:const|var)\s+[Vv]ersion(?:\s+string)?\s*=\s*")[^"]*(")', re.MULTILINE
+)
+
+# Retained as the broad pattern for callers that import it directly.
+_RE_GO_VERSION = _RE_GO_VERSION_ANY
 
 _RE_SEMVER = re.compile(
     r"^\d+\.\d+\.\d+"
@@ -48,6 +61,8 @@ __all__ = [
     "_RE_PYPROJECT_VERSION",
     "_RE_INIT_VERSION",
     "_RE_GO_VERSION",
+    "_RE_GO_VERSION_CONST",
+    "_RE_GO_VERSION_ANY",
     "_RE_SEMVER",
     "_make_gomod_re",
     "_read_text",
