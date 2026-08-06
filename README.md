@@ -606,6 +606,39 @@ known to be red trains people to ignore a red build. On the npm side a project
 the allowlist omits is pulled back in when something kept depends on it, since
 its build output is what makes the dependent testable at all.
 
+**Committed build output.** `ci.npm.extra_steps` runs after the test step, which
+is where a check on generated assets belongs — `build` has already regenerated
+them by then. A repo that commits build output because something else consumes
+it at compile time (a Go binary embedding an admin UI via `//go:embed`, say)
+can fail the job when the committed copy no longer matches its source:
+
+```yaml
+ci:
+  npm:
+    build: true
+    extra_steps:
+      - name: Verify the embedded admin UI matches web/src
+        working_directory: '.'          # the asset lives outside the npm package
+        run: |
+          if ! git diff --exit-code -- pkg/admin/ui; then
+            echo "::error::pkg/admin/ui is stale; rebuild and commit it."
+            exit 1
+          fi
+```
+
+Committing build output is what lets `go build` and a cross-compile matrix run
+without a Node toolchain; the cost is that it can fall behind silently, and this
+turns that into a failed PR rather than a stale UI in a released binary.
+
+On the npm side, a package whose `package.json` sets `"private": true` never
+gets a publish job — no allow-list entry required. npm refuses to publish a
+private package, so generating one could only ever produce a failing release,
+and the flag is a better declaration of intent than a versions.yaml list: it
+sits next to the package and it is what npm itself reads. Such packages are
+still *tested*; private means "not for the registry", not "not built". Naming
+one in `publish_projects` is a contradiction rather than an override, so it is
+rejected with a message identifying both halves.
+
 `publish_projects` is an allowlist of projects to generate publish jobs for.
 A manifest is not a declaration of intent to publish — a repo can hold a package
 that ships only as a container image, or a UI that never goes to npm — and the
@@ -723,6 +756,8 @@ ci:
     publish_requires_tests: true                # gate npm publish on test-npm.yml
     publish_projects: []                        # projects to publish; default [] = every TS project
     skip_if_published: false                    # skip publish when npm already serves this version
+    setup_steps: []                             # injected before install
+    extra_steps: []                             # injected after the test step
   go:
     go_version: "1.25.10"                       # default: from go_toolchain.go, else "1.25"
     lint: golangci-lint                          # golangci-lint | none; default: golangci-lint
@@ -906,6 +941,23 @@ suffixed too (`onlatest=true`): without that the variant would claim the bare
 `latest` tag and the two variants would silently overwrite whichever published last.
 This differs from `tag_style: dev`, which *prefixes* and suppresses `latest`; the two
 compose if a variant needs both.
+
+**`${image_version}`** resolves, inside a `build_args` value, to the same version
+the image is tagged with. A Dockerfile that stamps its artifact — `ARG VERSION`
+feeding an ldflags `-X main.version=` or an OCI `image.version` label — needs
+that number too, and hardcoding a second copy is a version that drifts silently
+from the tag. Requires `version_from` on the descriptor: without it there is no
+version to read, and an image that builds green while reporting a blank version
+is worse than one that refuses to generate.
+
+```yaml
+    gateway:
+      context: .
+      dockerfile: Dockerfile
+      version_from: llm-gateway
+      build_args:
+        VERSION: "${image_version}"        # also embeddable: "v${image_version}-oss"
+```
 
 **Build args.** `build_args` are **merged with** the `BASE_IMAGE` cascade, not an
 alternative to it — an image can inherit from a parent *and* pin its own

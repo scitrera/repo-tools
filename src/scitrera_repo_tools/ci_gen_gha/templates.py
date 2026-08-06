@@ -9,8 +9,9 @@ deterministic: sorted, alphabetical tie-breaks, fixed action versions.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import FrozenSet, Iterable, List, Optional
 
 from ..compile_protos.tools import resolve_ts_package_dir
 from ..version_sync.config import CiConfig, SyncConfig
@@ -494,6 +495,9 @@ def _npm_test_job(
           retention-days: 1
 """
 
+    setup_block = _render_steps(npm.setup_steps, project_dir)
+    extra_block = _render_steps(npm.extra_steps, project_dir)
+
     return f"""  test-{project}:
     name: Test {project}
     runs-on: ubuntu-latest
@@ -503,7 +507,7 @@ def _npm_test_job(
       - uses: {SETUP_NODE}
         with:
           node-version: '{npm.node_version}'{cache_with}
-{download_steps}
+{download_steps}{setup_block}
       - name: Install
         {NPM_INSTALL_RUN}
         working-directory: {project_dir}
@@ -511,7 +515,7 @@ def _npm_test_job(
       - name: Run tests
         run: npm test --if-present
         working-directory: {project_dir}
-{upload_step}"""
+{extra_block}{upload_step}"""
 
 
 def _go_test_job(
@@ -805,32 +809,63 @@ jobs:
 {jobs}"""
 
 
-def _filtered_publish_order(config: SyncConfig, lang: str, allow: tuple, where: str):
-    """`publish_order` restricted to `allow`, with dangling `needs` dropped.
+def _filtered_publish_order(
+    config: SyncConfig,
+    lang: str,
+    allow: tuple,
+    where: str,
+    exclude: FrozenSet[str] = frozenset(),
+):
+    """`publish_order` restricted to `allow` and minus `exclude`, `needs` pruned.
 
-    An excluded project must also disappear from its dependents' `needs`, or the
+    An omitted project must also disappear from its dependents' `needs`, or the
     workflow references a job that was never rendered and GitHub rejects it
     outright. Dropping the edge is correct rather than merely convenient: an
     unpublished project imposes no ordering constraint on the registry.
     """
     order = publish_order(config, lang)
-    if not allow:
+    known = {node.name for node in order}
+
+    if allow:
+        unknown = sorted(set(allow) - known)
+        if unknown:
+            raise ValueError(
+                f"{where} names {unknown}, which {'is' if len(unknown) == 1 else 'are'} "
+                f"not {lang} project(s); expected one of {sorted(known)}"
+            )
+        keep = set(allow)
+    else:
+        keep = set(known)
+
+    keep -= exclude
+    if keep == known:
         return order
 
-    known = {node.name for node in order}
-    unknown = sorted(set(allow) - known)
-    if unknown:
-        raise ValueError(
-            f"{where} names {unknown}, which {'is' if len(unknown) == 1 else 'are'} "
-            f"not {lang} project(s); expected one of {sorted(known)}"
-        )
-
-    keep = set(allow)
     return [
         PublishNode(name=n.name, needs=tuple(d for d in n.needs if d in keep))
         for n in order
         if n.name in keep
     ]
+
+
+def _private_npm_projects(config: SyncConfig) -> FrozenSet[str]:
+    """TS projects whose package.json declares `"private": true`.
+
+    npm refuses to publish these outright, so a generated publish job for one
+    could only ever fail. The flag is also a stronger signal of intent than a
+    versions.yaml allow-list: it lives next to the package, and it is what npm
+    itself reads. A malformed or unreadable manifest is left to the steps that
+    actually parse it, which report it far better than a skipped publish would.
+    """
+    private = set()
+    for project, manifest in manifests_for_language(config, "typescript").items():
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if data.get("private") is True:
+            private.add(project)
+    return frozenset(private)
 
 
 def _npm_published_guard(project_dir: str, indent: str = "      ") -> str:
@@ -1532,8 +1567,26 @@ def _npm_publish_job(
 
 
 def build_publish_npm(config: SyncConfig, ci: CiConfig) -> str:
+    # A package can be private *and* named in publish_projects, which is a
+    # contradiction rather than a preference. Silently honoring one side would
+    # either generate a job npm rejects or ignore an explicit instruction, so
+    # say which two things disagree.
+    private = _private_npm_projects(config)
+    conflict = sorted(private & set(ci.npm.publish_projects))
+    if conflict:
+        raise ValueError(
+            f"ci.npm.publish_projects names {conflict}, but package.json marks "
+            f'{"it" if len(conflict) == 1 else "them"} "private": true. npm '
+            f"refuses to publish a private package, so the job could only ever "
+            f"fail. Drop the entry, or remove the private flag."
+        )
+
     order = _filtered_publish_order(
-        config, "typescript", ci.npm.publish_projects, "ci.npm.publish_projects"
+        config,
+        "typescript",
+        ci.npm.publish_projects,
+        "ci.npm.publish_projects",
+        exclude=private,
     )
     if not order:
         return ""
@@ -1762,6 +1815,33 @@ def _docker_parent_job_id(parent_node) -> str:
     return f"build-{parent_node.name}"
 
 
+# The version an image is tagged with, usable inside a `build_args` value. A
+# Dockerfile that stamps its artifact (`ARG VERSION` feeding an ldflags `-X` or
+# an OCI label) needs the same number the tag uses, and without this it would
+# have to hardcode a second copy that drifts, or reach into the generator's
+# internal step id.
+_IMAGE_VERSION_REF = "${image_version}"
+_IMAGE_VERSION_EXPR = "${{ steps.imgver.outputs.version }}"
+
+
+def _resolve_image_version_ref(value: str, image) -> str:
+    """Substitute `${image_version}` with the resolved version step output.
+
+    Requires `version_from`: without it no version is read, and the reference
+    would silently expand to an empty build-arg — an image that builds green and
+    reports a blank version is worse than one that refuses to generate.
+    """
+    if _IMAGE_VERSION_REF not in value:
+        return value
+    if image.version_from is None:
+        raise ValueError(
+            f"build_args uses {_IMAGE_VERSION_REF} but the image declares no "
+            f"`version_from`, so there is no version to substitute. Add "
+            f"`version_from: <project>` to the image descriptor."
+        )
+    return value.replace(_IMAGE_VERSION_REF, _IMAGE_VERSION_EXPR)
+
+
 def _docker_build_args(
     node,
     parent_node,
@@ -1783,7 +1863,10 @@ def _docker_build_args(
             f"{indent}      {node.image.base_image_arg}="
             f"{parent_primary}:${{{{ needs.{parent_job}.outputs.base-tag }}}}"
         )
-    lines.extend(f"{indent}      {arg}={value}" for arg, value in sorted(node.image.build_args.items()))
+    lines.extend(
+        f"{indent}      {arg}={_resolve_image_version_ref(value, node.image)}"
+        for arg, value in sorted(node.image.build_args.items())
+    )
     if not lines:
         return ""
     body = "\n".join(lines)

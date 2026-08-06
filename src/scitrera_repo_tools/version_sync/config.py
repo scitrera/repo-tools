@@ -213,6 +213,12 @@ class CiNpmConfig:
     test_projects: tuple = ()
     publish_projects: tuple = ()
     skip_if_published: bool = False
+    # Same escape hatch the python side has. `extra_steps` runs after the test
+    # step, which is where a check on build output belongs: a repo that commits
+    # generated assets (an embedded UI, say) can rebuild them here and fail if
+    # the committed copy has gone stale.
+    setup_steps: tuple = ()                         # injected before install
+    extra_steps: tuple = ()                         # injected after the test step
 
 
 @dataclass(frozen=True)
@@ -742,6 +748,8 @@ _CI_NPM_KEYS = (
     "test_projects",
     "publish_projects",
     "skip_if_published",
+    "setup_steps",
+    "extra_steps",
 )
 _CI_GO_KEYS = (
     "go_version",
@@ -987,6 +995,14 @@ def _parse_ci_npm(raw: Any, project_versions: Mapping[str, str]) -> CiNpmConfig:
         kwargs["build"] = _expect_bool(block, "build", "ci.npm", False)
     if "cache" in block:
         kwargs["cache"] = _expect_bool(block, "cache", "ci.npm", False)
+    if "setup_steps" in block:
+        kwargs["setup_steps"] = _parse_ci_steps(
+            block["setup_steps"], "ci.npm.setup_steps"
+        )
+    if "extra_steps" in block:
+        kwargs["extra_steps"] = _parse_ci_steps(
+            block["extra_steps"], "ci.npm.extra_steps"
+        )
     if "npm_environment" in block:
         kwargs["npm_environment"] = str(block["npm_environment"])
     if "use_provenance" in block:
