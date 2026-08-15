@@ -52,9 +52,24 @@ binaries:
 '''
 
 
-def test_no_binaries_generates_nothing(tmp_path, write_file):
-    """Opt-in: a root-only module with no binaries still has nothing to publish."""
+def test_no_binaries_leaves_only_the_release(tmp_path, write_file):
+    """A root-only module with no binaries has nothing to *build*, but still releases.
+
+    HEAD sets `github_release: true`, which is the whole request for a library:
+    cut the release for the tag. What must not appear is any build job.
+    """
     cfg = _cfg(tmp_path, write_file, "test_args: '-count=1'\n")
+    doc = yaml.safe_load(build_publish_go(cfg, cfg.ci))
+    assert [j for j in doc["jobs"] if j.startswith("build-")] == []
+    assert doc["jobs"]["github-release"]["permissions"]["contents"] == "write"
+
+
+def test_no_binaries_and_no_release_generates_nothing(tmp_path, write_file):
+    """Opt-in: without `github_release` a root-only library publishes nothing."""
+    cfg = _cfg(
+        tmp_path, write_file, "test_args: '-count=1'\n",
+        head=HEAD.replace("  github_release: true\n", ""),
+    )
     assert build_publish_go(cfg, cfg.ci) == ""
 
 

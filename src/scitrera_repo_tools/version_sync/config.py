@@ -321,6 +321,13 @@ class CiGoConfig:
     binaries: tuple = ()
     # Default platform matrix for entries that name none.
     binary_platforms: tuple = DEFAULT_GO_BINARY_PLATFORMS
+    # Names the Go project whose version the release tag must equal; None
+    # disables the check. The Go counterpart of ci.python.verify_tag_version,
+    # and it matters more here: a Go module's version *is* its tag, so a tag
+    # that disagrees with versions.yaml is not a mislabelled artifact that can
+    # be re-uploaded — it is the released version, and deleting a published tag
+    # is exactly what the module proxy is built to make impossible.
+    verify_tag_version: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -763,6 +770,7 @@ _CI_GO_KEYS = (
     "govulncheck_ignore",
     "binaries",
     "binary_platforms",
+    "verify_tag_version",
 )
 _CI_GO_BINARY_KEYS = (
     "name",
@@ -1132,7 +1140,7 @@ def _parse_go_binaries(raw: Any) -> tuple:
     return tuple(out)
 
 
-def _parse_ci_go(raw: Any) -> CiGoConfig:
+def _parse_ci_go(raw: Any, project_versions: Mapping[str, str]) -> CiGoConfig:
     if raw is None:
         return CiGoConfig()
     block = _expect_mapping(raw, "ci.go")
@@ -1202,6 +1210,14 @@ def _parse_ci_go(raw: Any) -> CiGoConfig:
         )
     if "binaries" in block:
         kwargs["binaries"] = _parse_go_binaries(block["binaries"])
+    if "verify_tag_version" in block and block["verify_tag_version"] is not None:
+        project = str(block["verify_tag_version"])
+        if project not in project_versions:
+            raise ConfigError(
+                f"ci.go.verify_tag_version: '{project}' is not a known "
+                "project in versions.yaml"
+            )
+        kwargs["verify_tag_version"] = project
     return CiGoConfig(**kwargs)
 
 
@@ -1299,7 +1315,7 @@ def _parse_ci(raw: Any, project_versions: Mapping[str, str]) -> CiConfig:
     if "npm" in block:
         kwargs["npm"] = _parse_ci_npm(block["npm"], project_versions)
     if "go" in block:
-        kwargs["go"] = _parse_ci_go(block["go"])
+        kwargs["go"] = _parse_ci_go(block["go"], project_versions)
     if "docker" in block:
         kwargs["docker"] = _parse_ci_docker(block["docker"])
     return CiConfig(**kwargs)

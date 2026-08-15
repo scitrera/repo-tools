@@ -278,7 +278,7 @@ image descriptors are present:
 | `test-python.yml` | push/PR to `test_branches` | Matrix test across Python versions, per project |
 | `test-npm.yml` | push/PR to `test_branches` | Per-TS-project install + type-check + `npm test` |
 | `test-go.yml` | push/PR to `test_branches` | `go vet` + race-test + optional golangci-lint / govulncheck per Go project |
-| `publish-go.yml` | tag `v*.*.*` push | Reconcile per-module Go tags; cross-compile release binaries |
+| `publish-go.yml` | tag `v*.*.*` push | Reconcile per-module Go tags; cross-compile release binaries; cut the GitHub release |
 | `publish-python.yml` | tag `v*.*.*` push | Per-project PyPI publish in dependency order |
 | `publish-npm.yml` | tag `v*.*.*` push | Per-project npm publish in dependency order |
 | `build-docker.yml` | tag `v*.*.*` push + dispatch | Cascaded multi-arch image builds with inline test prereqs |
@@ -330,6 +330,35 @@ The check refuses to generate rather than emit a workflow that would bless that.
 Because the root tag drives everything, submodule tags like `api/v1.2.3` do not
 match the `v*.*.*` filters and trigger nothing — which is correct: they are the
 artifact, not the cause.
+
+### A GitHub release for a Go library
+
+A single-module library has no nested tags to reconcile and no binaries to
+build, so on the strength of the two halves above its release tag would trigger
+nothing at all. `ci.github_release` covers that case too: the workflow gates on
+the Go tests and cuts the release for the tag, attaching no files, because
+there is no artifact — `go get` resolves the version from the proxy and the
+release exists for its notes.
+
+```yaml
+ci:
+  github_release: true
+  go:
+    verify_tag_version: my-lib     # project name; omit to skip the check
+```
+
+`verify_tag_version` is the Go counterpart of `ci.python.verify_tag_version`,
+and it earns its keep more here: a Go module's version *is* its tag, so a tag
+that disagrees with `versions.yaml` is not a mislabelled artifact you can
+re-upload over — it is the released version, and the proxy exists to make
+published versions immutable. The job runs `sync-versions --check` as well,
+because `version-check.yml` only fires on pull requests. It gates the module-tag
+reconciliation too, so a bad tag is caught before any `<dir>/vX.Y.Z` is pushed.
+
+One release per tag: when the Python publish flow is also generating jobs, it
+already attaches its distributions to that same release, so the Go side adds no
+second release job. `ci.go.binaries` likewise brings its own release job, with
+the built binaries attached.
 
 ### Release binaries (`ci.go.binaries`)
 
@@ -766,6 +795,7 @@ ci:
     test_args: "-race -count=1"
     coverage: false                             # add -coverprofile/-covermode + upload artifact
     module_tags: none                           # none | verify | push (see publish-go below)
+    verify_tag_version: null                    # project name; fail the release if tag != its versions.yaml version
     govulncheck_version: "v1.1.4"               # pinned; an unpinned scanner reddens unrelated PRs
     govulncheck_ignore: []                      # accepted-risk advisories; see below
     binaries: []                                # commands to cross-compile for the release; see above

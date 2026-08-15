@@ -917,13 +917,16 @@ def _pypi_published_guard(project_dir: str, indent: str = "      ") -> str:
 """
 
 
-def _python_verify_tag_job(project: str, ci: CiConfig) -> str:
-    """Gate the upload on tag ↔ versions.yaml agreement.
+def _verify_tag_job(project: str, ci: CiConfig) -> str:
+    """Gate the release on tag ↔ versions.yaml agreement.
 
     Also runs `sync-versions --check`, because version-check.yml only fires on
     pull requests: a direct push to a release branch would otherwise reach a tag
     with manifests that disagree with versions.yaml. Skipped for
     workflow_dispatch runs, where there is no tag to compare against.
+
+    Language-agnostic by construction — it reads versions.yaml and the tag, and
+    touches no manifest — so the Python and Go publish flows share it.
     """
     return f"""  verify-tag:
     name: Verify tag matches {project} version
@@ -1267,10 +1270,45 @@ def _go_binaries_release_job(build_job_ids: List[str]) -> str:
 """
 
 
+def _python_publishes(config: SyncConfig, ci: CiConfig) -> bool:
+    """Whether publish-python.yml will render a publish job for this repo.
+
+    Asked the same way build_publish_python decides, rather than by looking for
+    pyproject rules: a repo can declare Python projects and still publish none
+    of them, and in that case nothing else is attaching artifacts to the tag.
+    """
+    return bool(
+        _filtered_publish_order(
+            config, "python", ci.python.publish_projects, "ci.python.publish_projects"
+        )
+    )
+
+
+def _go_library_release_job(needs: List[str]) -> str:
+    """Cut the GitHub release for a repo whose artifact is the tag itself.
+
+    No `files:` — there is nothing to attach. A Go module is fetched from the
+    proxy by tag, so the release exists for the changelog, not for downloads.
+    """
+    needs_clause = f"    needs: [ {', '.join(needs)} ]\n" if needs else ""
+    return f"""  github-release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+{needs_clause}    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub release
+        uses: {GH_RELEASE}
+        with:
+          generate_release_notes: true
+"""
+
+
 def build_publish_go(config: SyncConfig, ci: CiConfig) -> str:
     """Everything a Go repo publishes on a release tag.
 
-    Two independent halves, either of which can be the only one present:
+    Three independent halves, any of which can be the only one present:
 
     - Module tags. Go has no publish step — a version exists once
       `<dir>/vX.Y.Z` points at a commit — so this makes those tags true,
@@ -1278,18 +1316,39 @@ def build_publish_go(config: SyncConfig, ci: CiConfig) -> str:
     - Release binaries. Cross-compiled per `ci.go.binaries` and attached to
       the GitHub release, for the repos whose artifact is a command rather
       than (or as well as) an importable module.
+    - A bare GitHub release. What is left for a single-module *library*: no
+      tags to reconcile, no binaries, and nothing to upload anywhere, because
+      the tag itself is the artifact. Without this the release tag of a Go
+      library triggers nothing at all, and `ci.github_release` reads as
+      configured while doing nothing — the gap that had such repos
+      hand-writing a release workflow the generator does not manage.
     """
     go = ci.go
     modules = _go_modules(config)
     nested = [m for m in modules if m[1] != "."]
     want_tags = go.module_tags != "none" and bool(nested)
-    if not want_tags and not go.binaries:
+    # Only when no other language already owns the release. Python's publish
+    # flow attaches its distributions to this same tag, and two jobs creating
+    # one release is a race rather than two releases. Binaries are handled
+    # below by the job that has the artifacts to attach.
+    want_release = (
+        ci.github_release and not go.binaries and not _python_publishes(config, ci)
+    )
+    if not want_tags and not go.binaries and not want_release:
         return ""
 
     parts: List[str] = []
     gate_ids, test_jobs = _reusable_test_jobs(config, ci, "go")
     if test_jobs:
         parts.append(test_jobs)
+
+    # Ahead of the module tags and the release alike. A Go module's version *is*
+    # its tag: publish one that disagrees with versions.yaml and there is no
+    # re-upload to correct it, because the proxy is built to make a published
+    # version immutable.
+    if go.verify_tag_version is not None:
+        parts.append(_verify_tag_job(go.verify_tag_version, ci))
+        gate_ids = list(gate_ids) + ["verify-tag"]
 
     if want_tags:
         parts.append(_go_module_tags_job(config, ci, nested, modules, gate_ids))
@@ -1321,6 +1380,12 @@ def build_publish_go(config: SyncConfig, ci: CiConfig) -> str:
         # GitHub releases at all is one decision, not one per language.
         if ci.github_release:
             parts.append(_go_binaries_release_job(build_ids))
+
+    if want_release:
+        release_needs = list(gate_ids)
+        if want_tags:
+            release_needs.append("module-tags")
+        parts.append(_go_library_release_job(release_needs))
 
     jobs = "\n".join(parts)
     return f"""{GENERATED_HEADER}
@@ -1438,7 +1503,7 @@ def build_publish_python(config: SyncConfig, ci: CiConfig) -> str:
             parts.append(test_jobs)
         gate_ids.extend(test_ids)
     if py.verify_tag_version is not None:
-        parts.append(_python_verify_tag_job(py.verify_tag_version, ci))
+        parts.append(_verify_tag_job(py.verify_tag_version, ci))
         gate_ids.append("verify-tag")
 
     publish_ids: List[str] = []
