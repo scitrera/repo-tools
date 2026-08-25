@@ -1256,9 +1256,9 @@ def _go_binaries_release_job(build_job_ids: List[str]) -> str:
       - name: Checksums
         run: |
           set -euo pipefail
-          # Written outside dist/ first: `sha256sum * > dist/checksums.txt`
+          # Written outside dist/ first: `sha256sum -- * > dist/checksums.txt`
           # truncates the file before the glob expands, so it would list itself.
-          (cd dist && sha256sum *) > checksums.txt
+          (cd dist && sha256sum -- *) > checksums.txt
           mv checksums.txt dist/
           cat dist/checksums.txt
 
