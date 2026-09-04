@@ -228,9 +228,9 @@ def test_release_job_collects_every_build(tmp_path, write_file):
 
 
 def test_checksums_do_not_list_themselves(tmp_path, write_file):
-    """`sha256sum * > dist/checksums.txt` truncates before the glob expands."""
+    """The checksum file is created outside dist and cannot match its own glob."""
     run = _doc(tmp_path, write_file, ONE_BINARY)["jobs"]["github-release"]["steps"][1]["run"]
-    assert "(cd dist && sha256sum *) > checksums.txt" in run
+    assert "(cd dist && sha256sum ./*) > checksums.txt" in run
     assert "mv checksums.txt dist/" in run
 
 
