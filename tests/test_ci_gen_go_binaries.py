@@ -158,6 +158,12 @@ def test_empty_ldflags_omits_the_flag(tmp_path, write_file):
     assert "-ldflags" not in run
 
 
+def test_ldflags_without_commit_omits_commit_assignment(tmp_path, write_file):
+    doc = _doc(tmp_path, write_file, "binaries:\n  - name: app\n    ldflags: -s -w\n")
+    run = doc["jobs"]["build-app"]["steps"][-2]["run"]
+    assert 'COMMIT="$GITHUB_SHA"' not in run
+
+
 def test_dispatch_run_still_names_its_assets(tmp_path, write_file):
     """workflow_dispatch has no tag; an empty version would produce `app__linux_amd64`."""
     run = _doc(tmp_path, write_file, ONE_BINARY)["jobs"]["build-app"]["steps"][-2]["run"]

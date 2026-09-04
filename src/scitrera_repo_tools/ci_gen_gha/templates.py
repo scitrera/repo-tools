@@ -1175,6 +1175,9 @@ def _go_binary_build_job(
         f"          {k}: '{v}'\n" for k, v in sorted(env_pairs.items())
     )
     ldflags_arg = f' -ldflags "{binary.ldflags}"' if binary.ldflags else ""
+    commit_assignment = (
+        '          COMMIT="$GITHUB_SHA"\n' if "$COMMIT" in binary.ldflags else ""
+    )
     copies = "".join(
         f'          cp "$GITHUB_WORKSPACE/{f}" "$stage/"\n'
         for f in binary.extra_files
@@ -1212,8 +1215,7 @@ def _go_binary_build_job(
           else
             VERSION="0.0.0-dev.${{GITHUB_SHA:0:7}}"
           fi
-          COMMIT="$GITHUB_SHA"
-          bin="{binary.name}"
+{commit_assignment}          bin="{binary.name}"
           if [ "$GOOS" = windows ]; then bin="$bin.exe"; fi
           stage="$RUNNER_TEMP/stage-{binary.name}"
           rm -rf "$stage"
