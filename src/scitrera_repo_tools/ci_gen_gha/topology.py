@@ -69,20 +69,20 @@ def publish_order(config: SyncConfig, lang: str) -> List[PublishNode]:
 class DockerNode:
     """One docker image, its parent (if any), and its build strategy.
 
-    `strategy` is the resolved strategy (`qemu` or `native`) after applying
+    `strategy` is the resolved strategy (`qemu`, `native`, or `cross`) after applying
     the `auto` default against `ci.docker.platform_runners`. Children use
     this to pick the right parent job-id (`build-<parent>` for qemu,
-    `merge-<parent>` for native).
+    `build-<parent>` for cross, or `merge-<parent>` for native).
     """
     name: str
     image: DockerImage
     needs: Optional[str]
-    strategy: str          # "qemu" | "native"
+    strategy: str          # "qemu" | "native" | "cross"
 
 
 def _resolve_strategy(image: DockerImage, ci_docker, default_platforms: tuple) -> str:
     """Resolve `auto` → `qemu` or `native` based on the runner map."""
-    if image.build_strategy in {"qemu", "native"}:
+    if image.build_strategy in {"qemu", "native", "cross"}:
         return image.build_strategy
     platforms = image.platforms or default_platforms
     runners = ci_docker.platform_runners

@@ -1876,7 +1876,7 @@ def _docker_meta_step(
 
 
 def _docker_parent_job_id(parent_node) -> str:
-    """Parent's merge job in native mode, build job in qemu mode."""
+    """Parent's merge job in native mode, single build job otherwise."""
     if parent_node.strategy == "native":
         return f"merge-{parent_node.name}"
     return f"build-{parent_node.name}"
@@ -1942,15 +1942,23 @@ def _docker_build_args(
 """
 
 
-def _qemu_build_job(
+def _single_job_multiarch_build_job(
     node,
     parent_node,
     test_needs_csv: str,
     docker_cfg,
     ci: CiConfig,
     platforms_csv: str,
+    *,
+    use_qemu: bool,
 ) -> str:
-    """Single-job QEMU multi-arch build."""
+    """Single-job multi-arch build, with optional QEMU emulation.
+
+    The non-QEMU ``cross`` strategy is for Dockerfiles whose executable build
+    stages run on ``$BUILDPLATFORM`` and produce target artifacts from
+    ``$TARGETOS``/``$TARGETARCH``. Selecting it explicitly asserts that the
+    Dockerfile never needs to execute target-platform binaries.
+    """
     img = node.image
     needs_parts = []
     if test_needs_csv:
@@ -1974,8 +1982,11 @@ def _qemu_build_job(
     )
     build_args = _docker_build_args(node, parent_node, docker_cfg)
 
+    strategy_label = "QEMU multi-arch" if use_qemu else "cross-compiled multi-arch"
+    qemu_step = f"      - uses: {DOCKER_QEMU}\n\n" if use_qemu else ""
+
     return f"""  build-{img.name}:
-    name: Build {img.name} (QEMU multi-arch)
+    name: Build {img.name} ({strategy_label})
     runs-on: ubuntu-latest
 {needs_clause}    permissions:
       contents: read
@@ -1985,9 +1996,7 @@ def _qemu_build_job(
     steps:
       - uses: {CHECKOUT}
 
-      - uses: {DOCKER_QEMU}
-
-      - uses: {DOCKER_BUILDX}
+{qemu_step}      - uses: {DOCKER_BUILDX}
 
 {login_steps}{version_step}{workflow_dispatch_step}{meta_step}
       - name: Build and push
@@ -2009,6 +2018,7 @@ def _native_per_platform_job(
     parent_node,
     test_needs_csv: str,
     docker_cfg,
+    ci: CiConfig,
     platform: str,
     runner: str,
 ) -> str:
@@ -2026,6 +2036,12 @@ def _native_per_platform_job(
         needs_clause = f"    needs: [ {', '.join(needs_parts)} ]\n"
 
     login_steps = _docker_login_steps(docker_cfg)
+    version_step = _version_source_step(img.version_from, ci)
+    workflow_dispatch_step = (
+        _workflow_dispatch_version_step()
+        if ci.docker.enable_workflow_dispatch_version
+        else ""
+    )
     build_args = _docker_build_args(node, parent_node, docker_cfg)
     # OCI labels are baked into the image config at BUILD time, so a manifest-list
     # merge cannot add them afterwards — they have to be produced here or not at all.
@@ -2051,7 +2067,7 @@ def _native_per_platform_job(
 
       - uses: {DOCKER_BUILDX}
 
-{login_steps}{meta_step}      - name: Build and push by digest
+{login_steps}{version_step}{workflow_dispatch_step}{meta_step}      - name: Build and push by digest
         id: build
         uses: {DOCKER_BUILD_PUSH}
         with:
@@ -2226,9 +2242,16 @@ def build_build_docker(config: SyncConfig, ci: CiConfig) -> str:
 
         if node.strategy == "qemu":
             image_jobs.append(
-                _qemu_build_job(
+                _single_job_multiarch_build_job(
                     node, parent_node, test_needs_csv,
-                    docker_cfg, ci, platforms_csv,
+                    docker_cfg, ci, platforms_csv, use_qemu=True,
+                )
+            )
+        elif node.strategy == "cross":
+            image_jobs.append(
+                _single_job_multiarch_build_job(
+                    node, parent_node, test_needs_csv,
+                    docker_cfg, ci, platforms_csv, use_qemu=False,
                 )
             )
         else:  # native
@@ -2237,7 +2260,7 @@ def build_build_docker(config: SyncConfig, ci: CiConfig) -> str:
                 image_jobs.append(
                     _native_per_platform_job(
                         node, parent_node, test_needs_csv,
-                        docker_cfg, plat, runner,
+                        docker_cfg, ci, plat, runner,
                     )
                 )
             image_jobs.append(

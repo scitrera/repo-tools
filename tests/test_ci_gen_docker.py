@@ -77,6 +77,19 @@ def test_docker_order_native_when_runners_configured(aether_repo: Path) -> None:
     assert all(n.strategy == "native" for n in order)
 
 
+def test_docker_order_explicit_cross(aether_repo: Path) -> None:
+    body = (aether_repo / "versions.yaml").read_text()
+    body = body.replace(
+        "      version_from: gateway\n",
+        "      version_from: gateway\n      build_strategy: cross\n",
+        1,
+    )
+    (aether_repo / "versions.yaml").write_text(body, encoding="utf-8")
+    config = load_config(aether_repo / "versions.yaml")
+    order = docker_order(config)
+    assert order[0].strategy == "cross"
+
+
 def test_docker_order_cycle_raises(tmp_path: Path) -> None:
     _write(
         tmp_path,
@@ -165,6 +178,10 @@ def test_docker_native_cascade_uses_merge_job(aether_repo: Path) -> None:
     # Native mode → children reference parent's merge job, not build job.
     assert "needs.merge-aether.outputs.base-tag" in text
     assert "merge-aetherlite-dev" in text
+    parsed = yaml.safe_load(text)
+    for platform in ("linux-amd64", "linux-arm64"):
+        steps = parsed["jobs"][f"build-aether-{platform}"]["steps"]
+        assert any(step.get("id") == "imgver" for step in steps)
 
 
 def test_docker_tag_style_dev_flavor_latest_false(aether_repo: Path) -> None:
@@ -205,6 +222,35 @@ def test_docker_native_strategy_missing_runner_errors(tmp_path: Path) -> None:
     config = load_config(tmp_path / "versions.yaml")
     with pytest.raises(ValueError, match="no platform_runners entry"):
         docker_order(config)
+
+
+def test_docker_cross_strategy_omits_qemu(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "p: 1.2.3\n"
+        "project_rules:\n  p: []\n"
+        "docker:\n  dockerhub: example\n  images:\n"
+        "    tools:\n"
+        "      context: .\n"
+        "      dockerfile: Dockerfile\n"
+        "      version_from: p\n"
+        "      platforms: [linux/amd64, linux/arm64]\n"
+        "      build_strategy: cross\n",
+    )
+    config = load_config(tmp_path / "versions.yaml")
+    text = build_build_docker(config, config.ci)
+    parsed = yaml.safe_load(text)
+    assert list(parsed["jobs"]) == ["build-tools"]
+    job = parsed["jobs"]["build-tools"]
+    assert job["name"] == "Build tools (cross-compiled multi-arch)"
+    assert all(
+        step.get("uses") != "docker/setup-qemu-action@v3"
+        for step in job["steps"]
+    )
+    build = next(
+        step for step in job["steps"] if step.get("name") == "Build and push"
+    )
+    assert build["with"]["platforms"] == "linux/amd64,linux/arm64"
 
 
 def test_no_docker_block_yields_empty(tmp_path: Path) -> None:

@@ -925,7 +925,7 @@ docker:
       dockerfile: server/Dockerfile
       tag_style: standard                      # standard | dev; default: standard
       version_from: aether-gateway             # use versions.yaml[aether-gateway] for image tag
-      build_strategy: auto                     # auto | qemu | native; default: auto
+      build_strategy: auto                     # auto | qemu | native | cross; default: auto
     aetherlite:
       context: server
       dockerfile: server/Dockerfile.aetherlite-dev
@@ -1029,8 +1029,11 @@ just produced.
 
 **Build strategy.** `auto` (the default) picks `native` when every platform
 listed for the image has an entry in `ci.docker.platform_runners`; otherwise
-it falls back to a single QEMU job. `qemu` and `native` force one path
-explicitly. In `native` mode, the generator emits one job per platform
+it falls back to a single QEMU job. `qemu`, `native`, and `cross` force one
+path explicitly. `cross` emits one multi-platform BuildKit job without QEMU;
+it is intended for Dockerfiles that run build stages on `$BUILDPLATFORM` and
+cross-compile artifacts for `$TARGETOS`/`$TARGETARCH` without executing target
+binaries. In `native` mode, the generator emits one job per platform
 (builds + pushes by digest) followed by a `merge-<image>` job that creates
 the multi-arch manifest with `docker buildx imagetools create`.
 

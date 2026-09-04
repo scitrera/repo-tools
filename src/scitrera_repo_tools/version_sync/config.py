@@ -416,7 +416,7 @@ class DockerImage:
     needs: Optional[str] = None
     version_from: Optional[str] = None
     base_image_arg: str = "BASE_IMAGE"
-    build_strategy: str = "auto"             # "auto" | "qemu" | "native"
+    build_strategy: str = "auto"             # "auto" | "qemu" | "native" | "cross"
     # Extra `--build-arg` values, MERGED with the `base_image_arg` cascade rather
     # than replacing it. Values are resolved at parse time, so a
     # `${preferred_versions:<lang>:<pkg>}` reference lands in the generated
@@ -804,7 +804,7 @@ _CI_NPM_LINT_CHOICES = {"tsc-noemit", "eslint", "none"}
 _CI_GO_LINT_CHOICES = {"golangci-lint", "none"}
 _CI_GO_MODULE_TAG_MODES = {"none", "verify", "push"}
 _DOCKER_TAG_STYLES = {"standard", "dev"}
-_DOCKER_BUILD_STRATEGIES = {"auto", "qemu", "native"}
+_DOCKER_BUILD_STRATEGIES = {"auto", "qemu", "native", "cross"}
 _DOCKER_IMAGE_KEYS = (
     "context",
     "dockerfile",
