@@ -59,6 +59,8 @@ def _phase_a(
                 logger.debug("  %s: no files to update (version tracked externally)", project)
             continue
         for rule in rules:
+            if rule.type == "gowork":
+                continue  # Workspaces follow all module/dependency rewrites.
             abs_path = (config.root / rule.path).resolve()
             if not abs_path.exists():
                 errors.append(f"File not found: {abs_path}")
@@ -422,6 +424,18 @@ def run(
         changes=changes,
         errors=errors,
     )
+
+    for project, rules in config.project_rules.items():
+        for rule in rules:
+            if rule.type != "gowork":
+                continue
+            path = config.root / rule.path
+            try:
+                changed, old = STRATEGY_MAP["gowork"](path, config.project_versions[project], check)
+                if changed:
+                    changes.append((path, "workspace", old, "current module requirements"))
+            except (OSError, ValueError) as exc:
+                errors.append(str(exc))
 
     if errors:
         logger.error("Errors encountered:")

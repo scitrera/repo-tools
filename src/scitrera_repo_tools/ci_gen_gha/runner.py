@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from ..version_sync.config import SyncConfig
-from .templates import WORKFLOW_GENERATORS, render_all
+from .templates import render_all
 
 logger = logging.getLogger("scitrera_repo_tools.ci_gen_gha")
 
@@ -81,7 +81,7 @@ def run(
     """
     rendered = render_all(config)
 
-    known = {name[: -len(".yml")] for name, _ in WORKFLOW_GENERATORS}
+    known = {name[: -len(".yml")] for name in rendered}
     unknown = sorted(set(config.ci.only_workflows) - known)
     if unknown:
         # A typo here would silently manage nothing at all, so it is an error

@@ -297,6 +297,10 @@ class CiGoConfig:
     # test_args and separately remembering to enable the upload is how a repo
     # ends up generating a coverage file that nothing collects.
     coverage: bool = False
+    setup_steps: tuple = ()
+    extra_steps: tuple = ()
+    services: Mapping[str, Any] = field(default_factory=dict)
+    env: Mapping[str, str] = field(default_factory=dict)
     # How publish-go handles the per-module tags Go requires for nested modules.
     #   none   - do not generate publish-go.yml (default)
     #   verify - fail the release when a module tag is missing or points elsewhere
@@ -385,6 +389,8 @@ class CiConfig:
     # releases together — the release is a property of the tag, not of one
     # language's publish flow.
     github_release: bool = False
+    check_generated_ci: bool = False
+    release_mode: str = "combined"  # combined | independent (directory/vX.Y.Z tags)
     python: CiPythonConfig = field(default_factory=CiPythonConfig)
     npm: CiNpmConfig = field(default_factory=CiNpmConfig)
     go: CiGoConfig = field(default_factory=CiGoConfig)
@@ -720,6 +726,8 @@ _CI_KEYS = (
     "skip_workflows",
     "only_workflows",
     "github_release",
+    "release_mode",
+    "check_generated_ci",
     "python",
     "npm",
     "go",
@@ -765,6 +773,10 @@ _CI_GO_KEYS = (
     "enable_govulncheck",
     "test_args",
     "coverage",
+    "setup_steps",
+    "extra_steps",
+    "services",
+    "env",
     "module_tags",
     "govulncheck_version",
     "govulncheck_ignore",
@@ -1162,6 +1174,19 @@ def _parse_ci_go(raw: Any, project_versions: Mapping[str, str]) -> CiGoConfig:
         kwargs["enable_govulncheck"] = _expect_bool(block, "enable_govulncheck", "ci.go", False)
     if "test_args" in block:
         kwargs["test_args"] = str(block["test_args"])
+    for key in ("setup_steps", "extra_steps"):
+        if key in block:
+            kwargs[key] = _parse_ci_steps(block[key], f"ci.go.{key}")
+    if "services" in block:
+        services = _expect_mapping(block["services"], "ci.go.services")
+        for name, service in services.items():
+            _expect_mapping(service, f"ci.go.services.{name}")
+        kwargs["services"] = dict(services)
+    if "env" in block:
+        env = _expect_mapping(block["env"], "ci.go.env")
+        if any(v is None or isinstance(v, (dict, list, bool)) for v in env.values()):
+            raise ConfigError("ci.go.env: values must be strings or numbers")
+        kwargs["env"] = {str(k): str(v) for k, v in env.items()}
     if "coverage" in block:
         kwargs["coverage"] = _expect_bool(block, "coverage", "ci.go", False)
     if "govulncheck_version" in block:
@@ -1266,6 +1291,13 @@ def _parse_ci(raw: Any, project_versions: Mapping[str, str]) -> CiConfig:
     _reject_unknown(block, _CI_KEYS, "ci")
     kwargs: Dict[str, Any] = {}
 
+    if "check_generated_ci" in block:
+        kwargs["check_generated_ci"] = _expect_bool(block, "check_generated_ci", "ci", False)
+    if "release_mode" in block:
+        mode = str(block["release_mode"])
+        if mode not in ("combined", "independent"):
+            raise ConfigError("ci.release_mode: expected combined or independent")
+        kwargs["release_mode"] = mode
     if "bootstrap_method" in block:
         method = str(block["bootstrap_method"])
         if method not in _CI_BOOTSTRAP_METHODS:

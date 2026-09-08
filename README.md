@@ -1047,3 +1047,90 @@ runtime by the `workflow_dispatch` `version` input.
 ## License
 
 BSD 3-Clause.
+
+## Independent component releases
+
+Set `ci.release_mode: independent` when projects ship independently. The default
+`combined` mode keeps the existing root-tag workflows unchanged.
+
+```yaml
+core: 0.7.1
+client: 0.2.3
+project_rules:
+  core:
+    - {type: gomod, path: core/go.mod}
+  client:
+    - {type: pyproject, path: clients/python/pyproject.toml}
+ci:
+  release_mode: independent
+  github_release: true
+  repo_tools_source: scitrera-repo-tools==0.1.29
+```
+
+The generator writes `release-core.yml` for `core/v*.*.*` and
+`release-client.yml` for `clients/python/v*.*.*`. The directory containing the
+project manifest is the tag prefix; a root manifest uses `v*.*.*`. Each workflow
+checks its complete tag against that project's version, runs the existing test
+workflow, and publishes only that project's artifacts. It never creates sibling
+tags or overwrites existing tags. A component release therefore does not require
+a version bump in other components. A pushed Go module tag is already visible to
+Go consumers before Actions completes; validate and commit the release before
+the tag push.
+
+Images belong to a component through the existing `docker.images.*.version_from`
+field. Independent mode requires that field and builds only the selected
+component's images. Cascades within one component work; cross-component cascades
+must use an explicit versioned base image instead. This avoids rebuilding a
+sibling release under an existing immutable version. Version-only catalog entries
+without language manifests do not generate a release workflow.
+
+The existing `skip_workflows` and `only_workflows` controls also accept generated
+names such as `release-core`. When changing release modes, remove the obsolete
+combined publish workflows from the consuming repository; the generator does not
+delete files it previously managed.
+
+Go jobs accept the same `setup_steps` and `extra_steps` shape as Python/npm jobs,
+plus `services` and `env` maps for database-backed tests:
+
+```yaml
+ci:
+  go:
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres?sslmode=disable
+    setup_steps:
+      - {name: Check formatting, run: 'test -z "$(gofmt -l .)"'}
+```
+
+A `{type: gowork, path: go.work}` rule maintains a marked block of local,
+version-specific replacements for requirements on sibling workspace modules.
+This makes first-release checkouts build before the module tags exist, without
+putting local replacements in published `go.mod` files. The rule reads the
+`use` directories and their current requirements after other version updates;
+it preserves unrelated workspace configuration. Dependency upgrades remain
+explicit unless `dependency_mappings.go` is configured to synchronize them.
+
+### GitHub Actions defaults in 0.1.29
+
+Generated workflows now use checkout v7, setup-python v7.0.0, setup-go v7,
+setup-uv v10.0.1, and setup-buildx-action v4. The templates do not use the removed
+setup-python `pip-install` input or the deprecated buildx inputs. Buildx v4 uses
+Node 24 and requires Actions Runner 2.327.1 or newer; hosted runners satisfy this.
+Checkout v7 restricts checking out fork PRs in `pull_request_target` and
+`workflow_run` events; generated test workflows use `pull_request` and `push`.
+
+Upstream release notes: [checkout](https://github.com/actions/checkout/releases/tag/v7.0.0),
+[setup-python](https://github.com/actions/setup-python/releases/tag/v7.0.0),
+[setup-go](https://github.com/actions/setup-go/releases/tag/v7.0.0),
+[setup-uv](https://github.com/astral-sh/setup-uv/releases/tag/v10.0.1), and
+[setup-buildx](https://github.com/docker/setup-buildx-action/releases/tag/v4.0.0).
+
+Set `ci.check_generated_ci: true` to have the version-check workflow also reject
+generated-workflow drift. It then runs on edits to `.github/workflows/**` as well
+as version manifests. The default is false for incremental adoption.

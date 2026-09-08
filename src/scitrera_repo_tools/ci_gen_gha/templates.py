@@ -21,21 +21,21 @@ from ..version_sync.normalize import normalize_python
 from .topology import PublishNode, docker_order, publish_order
 
 # Pinned action versions — bumped explicitly, not picked up via floating tag.
-CHECKOUT = "actions/checkout@v6"
-SETUP_PYTHON = "actions/setup-python@v6"
+CHECKOUT = "actions/checkout@v7"
+SETUP_PYTHON = "actions/setup-python@v7.0.0"
 SETUP_NODE = "actions/setup-node@v6"
-SETUP_GO = "actions/setup-go@v6"
+SETUP_GO = "actions/setup-go@v7"
 PYPI_PUBLISH = "pypa/gh-action-pypi-publish@release/v1"
 GOLANGCI_LINT_ACTION = "golangci/golangci-lint-action@v8"
 DOCKER_LOGIN = "docker/login-action@v3"
 DOCKER_QEMU = "docker/setup-qemu-action@v3"
-DOCKER_BUILDX = "docker/setup-buildx-action@v3"
+DOCKER_BUILDX = "docker/setup-buildx-action@v4"
 DOCKER_META = "docker/metadata-action@v5"
 DOCKER_BUILD_PUSH = "docker/build-push-action@v6"
 UPLOAD_ARTIFACT = "actions/upload-artifact@v7"
 DOWNLOAD_ARTIFACT = "actions/download-artifact@v8"
 GH_RELEASE = "softprops/action-gh-release@v3"
-SETUP_UV = "astral-sh/setup-uv@v9.0.0"
+SETUP_UV = "astral-sh/setup-uv@v10.0.1"
 
 #: `npm ci` requires a committed package-lock.json and hard-fails without one.
 #: A repo can legitimately not commit a lockfile, and that repo should still get
@@ -192,6 +192,10 @@ def build_version_check(config: SyncConfig, ci: CiConfig) -> str:
         for rule in rules:
             paths.append(rule.path)
 
+    generation_check = ""
+    if ci.check_generated_ci:
+        paths.append(".github/workflows/**")
+        generation_check = f"\n      - name: Verify generated workflows\n        run: {_rt(ci, 'generate-ci-gha --check')}\n"
     paths_block = _format_paths_block(paths)
 
     return f"""{GENERATED_HEADER}
@@ -215,7 +219,7 @@ jobs:
 {_bootstrap_steps(ci)}
       - name: Verify versions are in sync
         run: {_rt(ci, "sync-versions --check --verbose")}
-"""
+{generation_check}"""
 
 
 def _render_steps(steps, default_dir: str, indent: str = "      ") -> str:
@@ -523,6 +527,16 @@ def _go_test_job(
 ) -> str:
     go = ci.go
     test_args = go.test_args
+    import textwrap
+    import yaml
+    job_config = {}
+    if go.services:
+        job_config["services"] = dict(go.services)
+    if go.env:
+        job_config["env"] = dict(go.env)
+    job_block = textwrap.indent(yaml.safe_dump(job_config, sort_keys=False), "    ") if job_config else ""
+    setup_block = _render_steps(go.setup_steps, project_dir)
+    extra_block = _render_steps(go.extra_steps, project_dir)
     coverage_step = ""
     if go.coverage:
         test_args = f"{test_args} -coverprofile=coverage.out -covermode=atomic"
@@ -542,13 +556,14 @@ def _go_test_job(
     return f"""  test-{project}:
     name: Test {project}
     runs-on: ubuntu-latest
-    steps:
+{job_block}    steps:
       - uses: {CHECKOUT}
 
       - uses: {SETUP_GO}
         with:
           go-version: '{go_version}'
 {cache_with}
+{setup_block}
 
       - name: go vet
         run: go vet ./...
@@ -557,7 +572,7 @@ def _go_test_job(
       - name: go test
         run: go test {test_args} ./...
         working-directory: {project_dir}
-{coverage_step}"""
+{extra_block}{coverage_step}"""
 
 
 def _go_lint_job(project: str, project_dir: str, ci: CiConfig, cache_with: str) -> str:
@@ -917,7 +932,7 @@ def _pypi_published_guard(project_dir: str, indent: str = "      ") -> str:
 """
 
 
-def _verify_tag_job(project: str, ci: CiConfig) -> str:
+def _verify_tag_job(project: str, ci: CiConfig, *, tag_prefix=None) -> str:
     """Gate the release on tag ↔ versions.yaml agreement.
 
     Also runs `sync-versions --check`, because version-check.yml only fires on
@@ -928,6 +943,8 @@ def _verify_tag_job(project: str, ci: CiConfig) -> str:
     Language-agnostic by construction — it reads versions.yaml and the tag, and
     touches no manifest — so the Python and Go publish flows share it.
     """
+    tag_expression = "${GITHUB_REF_NAME#v}" if tag_prefix is None else "$GITHUB_REF_NAME"
+    expected = "$declared" if tag_prefix is None else f"{tag_prefix}v$declared"
     return f"""  verify-tag:
     name: Verify tag matches {project} version
     runs-on: ubuntu-latest
@@ -942,9 +959,9 @@ def _verify_tag_job(project: str, ci: CiConfig) -> str:
         if: github.ref_type == 'tag'
         run: |
           set -euo pipefail
-          tag="${{GITHUB_REF_NAME#v}}"
+          tag="{tag_expression}"
           declared="$({_rt(ci, f"sync-versions --print-version {project}")})"
-          if [ "$tag" != "$declared" ]; then
+          if [ "$tag" != "{expected}" ]; then
             echo "::error::Tag ${{GITHUB_REF_NAME}} does not match the {project} version declared in versions.yaml ($declared)"
             exit 1
           fi
@@ -1843,11 +1860,14 @@ def _docker_meta_step(
     version_from: Optional[str],
     indent: str = "      ",
     tag_suffix: Optional[str] = None,
+    dispatch_version: bool = True,
 ) -> str:
     """Generate docker/metadata-action step + tag patterns."""
     refs = _docker_image_refs(docker_cfg, image_name)
     images_lines = "\n".join(f"{indent}      {r}" for r in refs)
     tag_lines = _docker_tag_lines(tag_style, version_from)
+    if not dispatch_version:
+        tag_lines = [line for line in tag_lines if "steps.ver." not in line]
     tags_block = "\n".join(f"{indent}      {t}" for t in tag_lines)
     flavor_lines: List[str] = []
     if tag_style == "dev":
@@ -1979,6 +1999,7 @@ def _single_job_multiarch_build_job(
     meta_step = _docker_meta_step(
         _image_ref_name(img), docker_cfg, img.tag_style, img.version_from,
         tag_suffix=img.tag_suffix,
+        dispatch_version=ci.docker.enable_workflow_dispatch_version,
     )
     build_args = _docker_build_args(node, parent_node, docker_cfg)
 
@@ -2052,6 +2073,7 @@ def _native_per_platform_job(
     meta_step = _docker_meta_step(
         _image_ref_name(img), docker_cfg, img.tag_style, img.version_from,
         tag_suffix=img.tag_suffix,
+        dispatch_version=ci.docker.enable_workflow_dispatch_version,
     )
 
     return f"""  build-{img.name}-{slug}:
@@ -2108,6 +2130,7 @@ def _native_merge_job(
     meta_step = _docker_meta_step(
         _image_ref_name(img), docker_cfg, img.tag_style, img.version_from,
         tag_suffix=img.tag_suffix,
+        dispatch_version=ci.docker.enable_workflow_dispatch_version,
     )
 
     return f"""  merge-{img.name}:
@@ -2493,7 +2516,15 @@ def render_all(config: SyncConfig) -> dict:
     ci = config.ci
     out = {}
     for filename, fn in WORKFLOW_GENERATORS:
-        out[filename] = fn(config, ci)
+        if ci.release_mode == "independent" and filename in (
+            "publish-go.yml", "publish-python.yml", "publish-npm.yml", "build-docker.yml"
+        ):
+            out[filename] = ""
+        else:
+            out[filename] = fn(config, ci)
+    if ci.release_mode == "independent":
+        from .independent import render_independent_releases
+        out.update(render_independent_releases(config))
     return out
 
 
