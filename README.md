@@ -316,6 +316,11 @@ commit than the release tag. `push` additionally creates and pushes the missing
 ones, and requests `contents: write`. Start on `verify`; move to `push` once a
 real release has proven the wiring.
 
+Push mode checks all existing module tags before publishing any missing tags,
+and pushes the missing set atomically. A conflicting tag or rejected update
+therefore leaves the remote module tags unchanged. Manual dispatch must select
+a root release tag, not a branch.
+
 Enabling it also turns on a consistency check that runs at generation time:
 **a nested module's path must end with its own directory.** This is worth
 understanding, because violating it fails quietly rather than loudly. Go locates
@@ -521,6 +526,23 @@ workflows run `sync-versions --release` inline to rewrite local refs
 (`workspace:`, `file:`, `git+...`, PEP 508 direct refs) into version pins
 before building, so published artifacts are installable from PyPI/npm
 without the original repo checkout.
+
+The npm publisher first synchronizes versions while preserving local references,
+then installs and builds each declared in-repo dependency in dependency order.
+It installs the publishing package before `--release` rewrites its references,
+then builds and publishes it. This supports lockfiles that retain local links
+and repositories without lockfiles, without relying on registry propagation or
+test-job artifacts. Build dependencies include private and publish-excluded
+projects in `dependency_mappings.typescript.dependencies`; each fresh publish
+job builds its own transitive dependency set. `ci.npm.setup_steps` also applies
+before these installs. The `ci.npm.build` switch controls test jobs only.
+
+Set `ci.npm.require_matching_tag: true` to require each published package's
+synchronized version to match the selected release tag, including manual
+dispatches. Combined releases require `v<version>`; independent releases require
+`<directory>/v<version>` (or `v<version>` for a root package). This is opt-in
+because combined releases can intentionally contain differently versioned
+packages.
 
 `publish-python.yml` additionally gates every upload on the test matrix
 (`ci.python.publish_requires_tests`, on by default), because a tag push is
@@ -785,6 +807,7 @@ ci:
     publish_requires_tests: true                # gate npm publish on test-npm.yml
     publish_projects: []                        # projects to publish; default [] = every TS project
     skip_if_published: false                    # skip publish when npm already serves this version
+    require_matching_tag: false                 # require the selected tag to match each package version
     setup_steps: []                             # injected before install
     extra_steps: []                             # injected after the test step
   go:
@@ -1115,6 +1138,17 @@ putting local replacements in published `go.mod` files. The rule reads the
 `use` directories and their current requirements after other version updates;
 it preserves unrelated workspace configuration. Dependency upgrades remain
 explicit unless `dependency_mappings.go` is configured to synchronize them.
+
+### Release fixes in 0.1.30
+
+- npm publish jobs build their declared sibling dependency closure from source
+  before rewriting local references to registry pins. This supports fresh
+  checkouts with and without lockfiles and filtered publication lists.
+- Inlined npm test gates preserve dependency ordering and build artifacts.
+- `ci.npm.require_matching_tag` optionally rejects branch dispatches and tags
+  that disagree with the synchronized package version.
+- Go module tag publication checks conflicts before pushing, pushes missing
+  tags atomically, and rejects branch dispatches.
 
 ### GitHub Actions defaults in 0.1.29
 

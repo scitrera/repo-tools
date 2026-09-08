@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import subprocess
 
 import pytest
 import yaml
@@ -92,7 +94,7 @@ def test_push_mode_requests_write_and_pushes(tmp_path, write_file):
     assert job["permissions"] == {"contents": "write"}
     assert job["name"] == "Publish Go module tags"
     run = job["steps"][-1]["run"]
-    assert "git tag" in run and "git push origin" in run
+    assert "git tag" in run and "git push --atomic origin" in run
 
 
 def test_full_history_is_fetched(tmp_path, write_file):
@@ -178,3 +180,48 @@ def test_invalid_mode_rejected(tmp_path, write_file):
 
 def test_deterministic(tmp_path, write_file):
     assert _doc(tmp_path, write_file) == _doc(tmp_path, write_file)
+
+
+def _git(root, *args):
+    return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
+
+
+@pytest.mark.parametrize("scenario", ["missing", "correct", "conflict", "rejected", "branch"])
+def test_module_tag_push_rehearsal(tmp_path, write_file, scenario):
+    """Exercise real tag pushes against a disposable local bare remote."""
+    script = _doc(tmp_path, write_file, "push")["jobs"]["module-tags"]["steps"][-1]["run"]
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(remote)], check=True)
+    _git(tmp_path, "init", "--quiet")
+    _git(tmp_path, "config", "user.email", "test@example.invalid")
+    _git(tmp_path, "config", "user.name", "Release test")
+    _git(tmp_path, "commit", "--allow-empty", "-m", "base")
+    old = _git(tmp_path, "rev-parse", "HEAD")
+    _git(tmp_path, "commit", "--allow-empty", "-m", "release")
+    release = _git(tmp_path, "rev-parse", "HEAD")
+    _git(tmp_path, "tag", "v1.2.3")
+    _git(tmp_path, "remote", "add", "origin", str(remote))
+    _git(tmp_path, "push", "origin", "refs/tags/v1.2.3")
+    if scenario in ("correct", "conflict"):
+        _git(tmp_path, "tag", "api/v1.2.3", old if scenario == "conflict" else release)
+        _git(tmp_path, "push", "origin", "refs/tags/api/v1.2.3")
+    if scenario == "rejected":
+        hook = remote / "hooks/update"
+        hook.write_text('#!/bin/sh\n[ "$1" != "refs/tags/sdk/go/v1.2.3" ]\n')
+        hook.chmod(0o755)
+    before = _git(remote, "show-ref", "--tags")
+    env = {**os.environ, "MODULE_DIRS": "api sdk/go",
+           "GITHUB_REF": "refs/heads/v1.2.3" if scenario == "branch" else "refs/tags/v1.2.3"}
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env,
+                            capture_output=True, text=True, timeout=30)
+    if scenario in ("conflict", "rejected", "branch"):
+        assert result.returncode != 0
+        assert _git(remote, "show-ref", "--tags") == before
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        for tag in ("api/v1.2.3", "sdk/go/v1.2.3"):
+            assert _git(remote, "rev-parse", tag) == release
+        # Retrying the workflow must accept already-correct tags.
+        result = subprocess.run(["bash", "-c", script], cwd=tmp_path, env=env,
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stdout + result.stderr

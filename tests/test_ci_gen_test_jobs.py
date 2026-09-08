@@ -454,4 +454,4 @@ def test_every_npm_install_site_tolerates_a_missing_lockfile():
     # No site may emit a bare `run: npm ci`; each must go through the shared
     # constant that falls back to `npm install`.
     assert "run: npm ci" not in src, "a bare `npm ci` install site remains"
-    assert src.count("{NPM_INSTALL_RUN}") == 3, "expected test, publish and proto to share the helper"
+    assert src.count("{NPM_INSTALL_RUN}") == 4, "expected test, publish, sibling build and proto to share the helper"

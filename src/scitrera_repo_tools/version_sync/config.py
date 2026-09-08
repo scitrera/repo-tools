@@ -213,6 +213,9 @@ class CiNpmConfig:
     test_projects: tuple = ()
     publish_projects: tuple = ()
     skip_if_published: bool = False
+    # Require a release tag matching each package's synchronized version,
+    # including manual dispatches. Independent mode includes the directory.
+    require_matching_tag: bool = False
     # Same escape hatch the python side has. `extra_steps` runs after the test
     # step, which is where a check on build output belongs: a repo that commits
     # generated assets (an embedded UI, say) can rebuild them here and fail if
@@ -763,6 +766,7 @@ _CI_NPM_KEYS = (
     "test_projects",
     "publish_projects",
     "skip_if_published",
+    "require_matching_tag",
     "setup_steps",
     "extra_steps",
 )
@@ -1001,6 +1005,11 @@ def _parse_ci_npm(raw: Any, project_versions: Mapping[str, str]) -> CiNpmConfig:
     block = _expect_mapping(raw, "ci.npm")
     _reject_unknown(block, _CI_NPM_KEYS, "ci.npm")
     kwargs: Dict[str, Any] = {}
+
+    if "require_matching_tag" in block:
+        kwargs["require_matching_tag"] = _expect_bool(
+            block, "require_matching_tag", "ci.npm", False
+        )
 
     if "node_version" in block:
         kwargs["node_version"] = str(block["node_version"])

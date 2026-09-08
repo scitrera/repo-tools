@@ -742,13 +742,10 @@ jobs:
 {"".join(jobs)}"""
 
 
-def build_test_npm(config: SyncConfig, ci: CiConfig) -> str:
+def _npm_test_jobs(config: SyncConfig, ci: CiConfig) -> tuple:
     projects = _npm_projects(config)
     if not projects:
-        return ""
-
-    branches_csv = ", ".join(ci.test_branches)
-    push_csv = ", ".join(_push_branches(ci))
+        return "", []
     dirs = {p: _project_dir(config, "typescript", p) for p in projects}
 
     # Threading build output between test jobs only makes sense when there is a
@@ -796,6 +793,15 @@ def build_test_npm(config: SyncConfig, ci: CiConfig) -> str:
         )
         for p in sequence
     )
+    return jobs, [f"test-{p}" for p in sequence]
+
+
+def build_test_npm(config: SyncConfig, ci: CiConfig) -> str:
+    jobs, _ = _npm_test_jobs(config, ci)
+    if not jobs:
+        return ""
+    branches_csv = ", ".join(ci.test_branches)
+    push_csv = ", ".join(_push_branches(ci))
 
     return f"""{GENERATED_HEADER}
 name: Test (npm)
@@ -1455,10 +1461,10 @@ def _go_module_tags_job(
               echo "$tag already correct"
             fi
           done
+          [ "$bad" = 0 ]
           if [ -n "$new" ]; then
-            git push origin $new
-          fi
-          [ "$bad" = 0 ]"""
+            git push --atomic origin $new
+          fi"""
     else:
         action_block = """            if [ -z "$have" ]; then
               echo "::error::missing tag $tag — Go cannot resolve this module at $VERSION"
@@ -1490,8 +1496,8 @@ def _go_module_tags_job(
           MODULE_DIRS: "{dirs_csv}"
         run: |
           set -euo pipefail
-          VERSION="${{{{ github.ref_name }}}}"
-          case "$VERSION" in v*) ;; *) echo "::error::expected a v-prefixed tag"; exit 1 ;; esac
+          case "$GITHUB_REF" in refs/tags/v*) ;; *) echo "::error::expected a v-prefixed tag"; exit 1 ;; esac
+          VERSION="${{GITHUB_REF#refs/tags/}}"
           sha="$(git rev-list -n1 "$VERSION")"
           bad=0
           new=""
@@ -1580,6 +1586,7 @@ def _npm_publish_job(
     needs: Iterable[str],
     ci: CiConfig,
     extra_needs: Iterable[str] = (),
+    local_deps: Iterable[tuple] = (),
 ) -> str:
     npm = ci.npm
     needs_clause = ""
@@ -1617,6 +1624,42 @@ def _npm_publish_job(
         guard_step = "\n" + _npm_published_guard(project_dir)
         publish_if = "        if: steps.published.outputs.skip != 'true'\n"
 
+    # Every publish job starts from a fresh checkout. A successful upstream
+    # publish does not populate a sibling's dist/, and npm ci can retain the
+    # lockfile's local links even after package.json has been rewritten. Build
+    # the entire dependency closure locally, before changing those specifiers.
+    # This also works without test artifacts, lockfiles, or upstream publishes.
+    dependency_steps = ""
+    for dep, dep_dir in local_deps:
+        dependency_steps += _render_steps(npm.setup_steps, dep_dir)
+        dependency_steps += f"""
+      - name: Install in-repo dependency ({dep})
+        {NPM_INSTALL_RUN}
+        working-directory: {dep_dir}
+
+      - name: Build in-repo dependency ({dep})
+        run: npm run build --if-present
+        working-directory: {dep_dir}
+"""
+    setup_block = _render_steps(npm.setup_steps, project_dir)
+    tag_step = ""
+    if npm.require_matching_tag:
+        prefix = (
+            f"{project_dir}/"
+            if ci.release_mode == "independent" and project_dir != "." else ""
+        )
+        tag_step = f"""
+      - name: Verify release tag matches package version
+        working-directory: {project_dir}
+        run: |
+          set -euo pipefail
+          expected="{prefix}v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF" != "refs/tags/$expected" ]; then
+            echo "::error::Select release tag $expected to publish this package"
+            exit 1
+          fi
+"""
+
     return f"""  publish-{project}:
     name: Publish {project} to npm
     runs-on: ubuntu-latest
@@ -1633,12 +1676,15 @@ def _npm_publish_job(
           node-version: '{npm.node_version}'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Rewrite local refs to version pins
-        run: {_rt(ci, "sync-versions --release")}
-
+      - name: Synchronize versions while preserving local refs
+        run: {_rt(ci, "sync-versions")}
+{tag_step}{dependency_steps}{setup_block}
       - name: Install dependencies
         {NPM_INSTALL_RUN}
         working-directory: {project_dir}
+
+      - name: Rewrite local refs to version pins
+        run: {_rt(ci, "sync-versions --release")}
 
       - name: Build
         run: npm run build --if-present
@@ -1682,6 +1728,10 @@ def build_publish_npm(config: SyncConfig, ci: CiConfig) -> str:
         if test_jobs:
             parts.append(test_jobs)
 
+    # Keep build dependencies even when they are private or excluded from the
+    # publish allowlist. Registry ordering and checkout build ordering differ.
+    build_order = publish_order(config, "typescript")
+    closure = _npm_dep_closure(build_order)
     for node in order:
         parts.append(
             _npm_publish_job(
@@ -1690,6 +1740,10 @@ def build_publish_npm(config: SyncConfig, ci: CiConfig) -> str:
                 node.needs,
                 ci,
                 gate_ids,
+                local_deps=[
+                    (dep.name, _project_dir(config, "typescript", dep.name))
+                    for dep in build_order if dep.name in closure[node.name]
+                ],
             )
         )
     jobs = "\n".join(parts)
@@ -2219,9 +2273,10 @@ def _inline_test_jobs(config: SyncConfig, ci: CiConfig, prereqs=None) -> tuple:
             )
             ids.append(f"test-{p}")
     if "npm" in test_prereqs:
-        for p in _npm_projects(config):
-            parts.append(_npm_test_job(p, _project_dir(config, "typescript", p), ci))
-            ids.append(f"test-{p}")
+        npm_jobs, npm_ids = _npm_test_jobs(config, ci)
+        if npm_jobs:
+            parts.append(npm_jobs)
+        ids.extend(npm_ids)
     if "go" in test_prereqs:
         go_version = _go_version(config)
         for p in _go_projects(config):
