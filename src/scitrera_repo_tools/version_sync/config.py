@@ -281,6 +281,12 @@ class GoBinary:
     # Extra repo-relative files copied beside the binary into the archive
     # (LICENSE, README). Ignored when archive is "none".
     extra_files: tuple = ()
+    # Optional native helper toolchain setup and target-native build runners.
+    platform_runners: Mapping[str, str] = field(default_factory=dict)
+    setup_steps: tuple = ()
+    # Trusted shell run after the Go executable and extra files are staged.
+    # BUNDLE_DIR, VERSION, GOOS and GOARCH are exported to the command.
+    package_command: Optional[str] = None
     # Extra build environment. CGO_ENABLED=0 is applied first and can be
     # overridden here, but cross-compiling with cgo needs a C toolchain the
     # generated job does not install.
@@ -796,6 +802,9 @@ _CI_GO_BINARY_KEYS = (
     "ldflags",
     "archive",
     "extra_files",
+    "platform_runners",
+    "setup_steps",
+    "package_command",
     "env",
 )
 _CI_GO_BINARY_ARCHIVES = {"auto", "tar.gz", "zip", "none"}
@@ -1141,6 +1150,22 @@ def _parse_go_binaries(raw: Any) -> tuple:
                     f"got '{archive}'"
                 )
             kwargs["archive"] = archive
+        if "platform_runners" in block:
+            runners = _expect_mapping(block["platform_runners"], f"{at}.platform_runners")
+            for target, runner in runners.items():
+                _parse_go_platforms([target], f"{at}.platform_runners")
+                if not isinstance(runner, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", runner):
+                    raise ConfigError(f"{at}.platform_runners: expected a runner label")
+            kwargs["platform_runners"] = dict(runners)
+        if "setup_steps" in block:
+            kwargs["setup_steps"] = _parse_ci_steps(block["setup_steps"], f"{at}.setup_steps")
+        if "package_command" in block:
+            command = block["package_command"]
+            if not isinstance(command, str) or not command.strip() or "\0" in command:
+                raise ConfigError(f"{at}.package_command: expected a non-empty shell command")
+            if kwargs.get("archive", "auto") == "none":
+                raise ConfigError(f"{at}.package_command: requires an archive")
+            kwargs["package_command"] = command.rstrip()
         if "extra_files" in block:
             files = block["extra_files"]
             if not isinstance(files, list):

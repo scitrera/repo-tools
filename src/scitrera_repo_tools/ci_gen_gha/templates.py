@@ -1142,7 +1142,10 @@ def _go_binary_matrix(ci: CiConfig, binary) -> str:
     lines = []
     for platform in platforms:
         goos, _, goarch = platform.partition("/")
-        lines.append(f"          - {{ goos: {goos}, goarch: {goarch} }}")
+        runner = ""
+        if binary.platform_runners:
+            runner = f", runner: {binary.platform_runners.get(platform, 'ubuntu-latest')}"
+        lines.append(f"          - {{ goos: {goos}, goarch: {goarch}{runner} }}")
     return "\n".join(lines)
 
 
@@ -1184,11 +1187,11 @@ def _go_binary_build_job(
 ) -> str:
     """Cross-compile one command across its platform matrix.
 
-    Every leg runs on ubuntu-latest: with CGO off, `go build` cross-compiles to
+    By default every leg runs on ubuntu-latest: with CGO off, `go build` cross-compiles to
     every target without a foreign toolchain, so a per-OS runner would cost
     queue time and buy nothing. A binary that genuinely needs cgo must set
     `env: { CGO_ENABLED: "1" }` and will need a runner that can link for it —
-    which this generator does not provide.
+    selected through platform_runners, with dependencies installed by setup_steps.
     """
     needs_clause = f"    needs: [ {', '.join(needs)} ]\n" if needs else ""
     # CGO_ENABLED first so an explicit env entry can override it.
@@ -1206,9 +1209,16 @@ def _go_binary_build_job(
         for f in binary.extra_files
     ) if binary.archive != "none" else ""
 
+    runner = "${{ matrix.runner }}" if binary.platform_runners else "ubuntu-latest"
+    setup_block = _render_steps(binary.setup_steps, project_dir)
+    package_block = ""
+    if binary.package_command:
+        package_block = '          export BUNDLE_DIR="$stage" VERSION GOOS GOARCH\n'
+        package_block += "\n".join("          " + line for line in binary.package_command.splitlines()) + "\n"
+
     return f"""  build-{binary.name}:
     name: Build {binary.name} (${{{{ matrix.goos }}}}/${{{{ matrix.goarch }}}})
-    runs-on: ubuntu-latest
+    runs-on: {runner}
 {needs_clause}    strategy:
       # One unsupported target must not withhold the assets for every other
       # platform; the release job needs what did build.
@@ -1224,7 +1234,7 @@ def _go_binary_build_job(
           go-version: '{go_version}'
 {cache_with}
 
-      - name: Build
+{setup_block}      - name: Build
         working-directory: {project_dir}
         env:
 {env_lines}          GOOS: ${{{{ matrix.goos }}}}
@@ -1244,7 +1254,7 @@ def _go_binary_build_job(
           rm -rf "$stage"
           mkdir -p "$stage"
           go build -trimpath{ldflags_arg} -o "$stage/$bin" {binary.package}
-{copies}          dist="$GITHUB_WORKSPACE/dist"
+{copies}{package_block}          dist="$GITHUB_WORKSPACE/dist"
           mkdir -p "$dist"
           base="{binary.name}_${{VERSION}}_${{GOOS}}_${{GOARCH}}"
 {_go_binary_pack_block(binary)}

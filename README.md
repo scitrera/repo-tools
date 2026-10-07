@@ -399,11 +399,28 @@ double-quoted shell argument — which is what makes that expansion work — so 
 double quote in it is rejected at config time rather than producing a build
 command nobody wrote.
 
-Every leg builds on `ubuntu-latest` with `CGO_ENABLED=0`, because Go
-cross-compiles to all of these without a foreign toolchain and a per-OS runner
-would buy queue time and nothing else. `env:` can override that, but a cgo build
-also needs a runner that can link for the target, which this generator does not
-provide.
+By default every leg uses `ubuntu-latest` and `CGO_ENABLED=0` for pure Go
+cross-compilation. For native dependencies, assign `platform_runners` per binary:
+
+```yaml
+platform_runners:
+  linux/amd64: ubuntu-24.04
+  linux/arm64: ubuntu-24.04-arm
+  darwin/arm64: macos-15
+setup_steps:
+  - name: Native tests
+    run: go test -race ./...
+package_command: python3 scripts/build-helper.py
+```
+
+Unmapped platforms retain `ubuntu-latest`. `setup_steps` run after Go setup and
+before the build; they use the same `name`/`run`/`if`/`working_directory` schema
+as other setup hooks. `package_command` runs after the Go executable and
+`extra_files` reach the staging directory, with `BUNDLE_DIR`, `VERSION`, `GOOS`
+and `GOARCH` exported. It can build and test native helpers, copy licenses, and
+write a bundle manifest before archiving. It requires an archive format other
+than `none`; a failing hook fails the build. Native helper scripts should verify
+the host OS/architecture and reject accidental cross-architecture execution.
 
 Two behaviours are deliberate:
 

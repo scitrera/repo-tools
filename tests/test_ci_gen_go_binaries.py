@@ -356,3 +356,41 @@ def test_deterministic(tmp_path, write_file):
 def test_config_rejects_bad_binary_descriptors(tmp_path, write_file, block, match):
     with pytest.raises(ConfigError, match=match):
         _cfg(tmp_path, write_file, block)
+
+
+def test_native_helper_setup_and_packaging(tmp_path, write_file):
+    doc = _doc(tmp_path, write_file, '''binaries:
+  - name: app
+    platforms: [linux/amd64, linux/arm64, darwin/arm64]
+    platform_runners:
+      linux/arm64: ubuntu-24.04-arm
+      darwin/arm64: macos-15
+    setup_steps:
+      - name: Prepare compiler
+        run: ./compiler.sh
+    package_command: |
+      ./bundle.sh "$BUNDLE_DIR"
+      test -x "$BUNDLE_DIR/helper"
+''')
+    job = doc['jobs']['build-app']
+    assert job['runs-on'] == '${{ matrix.runner }}'
+    assert [p['runner'] for p in job['strategy']['matrix']['include']] == [
+        'ubuntu-latest', 'ubuntu-24.04-arm', 'macos-15']
+    steps = job['steps']
+    assert next(i for i, s in enumerate(steps) if s.get('name') == 'Prepare compiler') < next(
+        i for i, s in enumerate(steps) if s.get('name') == 'Build')
+    command = next(s['run'] for s in steps if s.get('name') == 'Build')
+    assert 'export BUNDLE_DIR="$stage" VERSION GOOS GOARCH' in command
+    assert command.index('go build') < command.index('./bundle.sh') < command.index('tar -czf')
+    assert 'test -x "$BUNDLE_DIR/helper"' in command
+
+
+@pytest.mark.parametrize('entry,match', [
+    ('platform_runners: {linux/x86_64: ubuntu-latest}', 'unknown GOARCH'),
+    ('platform_runners: {linux/arm64: null}', 'runner label'),
+    ('package_command: null', 'non-empty shell command'),
+    ('package_command: echo helper\n    archive: none', 'requires an archive'),
+])
+def test_invalid_native_helper_configuration(tmp_path, write_file, entry, match):
+    with pytest.raises(ConfigError, match=match):
+        _cfg(tmp_path, write_file, 'binaries:\n  - name: app\n    '+entry+'\n')
